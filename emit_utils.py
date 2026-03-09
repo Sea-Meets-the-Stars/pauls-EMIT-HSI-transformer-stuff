@@ -1,11 +1,39 @@
-import earthaccess
-import matplotlib.pyplot as plt
+##Imports
+import sys, os, glob, gc
+import numpy as np
+import pandas as pd
+import json
+
 import requests
 from PIL import Image
 from io import BytesIO
-import numpy as np
-from skimage import feature, color
-from matplotlib import colors as mcolors
+
+import earthaccess
+from georeader.readers import emit, download_utils
+import geopandas
+import rioxarray
+import geopandas as gpd
+import rioxarray as rxr
+from rioxarray.merge import merge_arrays
+from scipy.ndimage import gaussian_filter, binary_dilation
+from scipy.spatial import cKDTree
+
+import rasterio.features
+from rasterio.enums import Resampling
+import xarray as xr
+import tempfile
+import netCDF4 as nc
+import matplotlib.pyplot as plt
+
+sys.path.append('./STARCOP/starcop')
+from starcop.models import mag1c_emit
+
+sys.path.append("./EMIT-Data-Resources/python/modules")
+from emit_tools import emit_xarray
+
+
+KNOWN_BAD_GRANULE_IDS = ["20240812T213914"]
+
 
 def get_plume_granule_ids(gas_type="CH4", date_range=('2022-08-01', '2026-12-31'), max_count=100, cloud_cover_range=(0, 5)):
     """
@@ -202,3 +230,559 @@ def display_plume_previews(granule_id, gas_type="ch4"):
     plt.tight_layout()
     plt.show()
     
+## Get list of L2B products:
+def search_l2b_metadata(date_range=('2023-01-01', '2023-12-31'), max_count=10, cloudcover_max = 1, cloudcover_min = 0):
+    methane_plume_product_name = "EMITL2BCH4PLM"
+    earthaccess.login(persist=True)
+    
+    ## Search for L2B Plume data
+    print(f"Searching for L2B Plume data in date range: {date_range}...")
+    l2b_plume_results = earthaccess.search_data(
+        short_name=methane_plume_product_name,
+        temporal=date_range,
+        cloud_cover=(cloudcover_min, cloudcover_max),
+        count=max_count
+    )
+    print(f"Found {len(l2b_plume_results)} L2B Plume products")
+    
+    return l2b_plume_results
+
+## Get unique granule IDs:
+def get_unique_granule_ids(l2b_metadata_list):
+    granule_ids = []
+    for l2b_product in l2b_metadata_list:
+        granule_id = l2b_product['umm']['GranuleUR']
+        granule_id = granule_id.split('_')[4]
+        granule_ids.append(granule_id)
+    
+    granule_ids = list(set(granule_ids))
+    print(f"Found {len(granule_ids)} unique granule IDs")
+    return granule_ids
+
+## Get list of L1B products:
+def get_l1b_metadata(granule_ids):
+    earthaccess.login(persist=True)
+    l1b_products = []
+    for granule_id in granule_ids:
+        l1b_products.extend(earthaccess.search_data(
+            short_name="EMITL1BRAD",
+            granule_name=f'*{granule_id}*',
+        ))
+    return l1b_products
+
+## Download hypercube + run MAG1C and get metadata:
+def download_one_l1b_hypercube(granule_id, temp_dir="/more_data/temp_processing/emit_download/", show_progress=False):
+    earthaccess.login(persist=True)
+    
+    l1b_metadata = get_l1b_metadata([granule_id])
+    
+    os.makedirs(temp_dir, exist_ok=True)
+    downloaded_paths = earthaccess.download(l1b_metadata, temp_dir, show_progress=show_progress)
+    
+    rad_path = None
+    for path in downloaded_paths:
+        if "RAD" in os.path.basename(path):
+            rad_path = path
+            break
+    
+    if rad_path is None:
+        raise ValueError("No RAD file found in downloaded paths")
+    print(rad_path)
+    
+    rst = emit.EMITImage(rad_path)
+    mag1c_output, _ = mag1c_emit.mag1c_emit(rst, column_step=2, georreferenced=True)
+    del rst
+    
+    l1b_product = emit_xarray(rad_path, ortho=True)
+        
+    #remove files in temp_dir:
+    for path in downloaded_paths:
+        os.remove(path)
+    
+    gc.collect()
+    return l1b_product, mag1c_output
+
+
+def get_l2bs_for_granule_id(granule_id):
+    """
+    granule_id: e.g. "20230107T143818" (the timestamp you extracted)
+    Returns stats computed over the union mosaic of all CH4PLM plume-complex GeoTIFFs for that granule_id.
+    """
+    earthaccess.login(persist=True)
+
+    search_kwargs = dict(short_name="EMITL2BCH4PLM", granule_name=f"*{granule_id}*")
+    plume_granules = earthaccess.search_data(**search_kwargs)
+    
+    search_kwargs = dict(short_name="EMITL2BCH4ENH", version="002", granule_name=f"*{granule_id}*")
+    ch4_enh_layers = earthaccess.search_data(**search_kwargs)
+
+    return plume_granules, ch4_enh_layers
+
+
+def download_one_l2b_set(granule_id, temp_dir="/more_data/temp_processing/emit_download/", onlytifs=False, show_progress=False):
+    l2b_plm_metas, l2b_enh_metas = get_l2bs_for_granule_id(granule_id)
+    os.makedirs(temp_dir, exist_ok=True)
+    downloaded_paths = earthaccess.download(l2b_plm_metas, temp_dir, show_progress=show_progress)
+    l2b_jsons = []
+    l2b_tifs = []
+    for path in downloaded_paths:
+        if os.path.basename(path).lower().endswith(".json") and not onlytifs:
+            plume_metadata = geopandas.read_file(path)
+            l2b_jsons.append(plume_metadata)
+        elif os.path.basename(path).lower().endswith(".tif"):
+            plume_mask = rioxarray.open_rasterio(path).squeeze("band", drop=True) #has only one band, drops that dim
+            l2b_tifs.append(plume_mask)
+            
+    #remove files in temp_dir:
+    for path in downloaded_paths:
+        os.remove(path)
+    
+    l2b_enhs = []
+    if not onlytifs:
+        downloaded_paths = earthaccess.download(l2b_enh_metas, temp_dir, show_progress=show_progress)
+        for path in downloaded_paths:
+            if os.path.basename(path).lower().endswith(".tif") and "CH4ENH" in os.path.basename(path):
+                enh_layer = rioxarray.open_rasterio(path).squeeze("band", drop=True)
+                l2b_enhs.append(enh_layer)
+        for path in downloaded_paths:
+            os.remove(path)
+    gc.collect()
+            
+    return l2b_jsons, l2b_tifs, l2b_enhs
+
+
+def get_plume_mask_and_stats(plume_tif, visualize_flag=False):
+    plume_mask = plume_tif.values.copy()
+    plume_mask[plume_mask == -9999] = np.nan
+    max_ppmm = np.nanmax(plume_mask)
+    mean_ppmm = np.nanmean(plume_mask[plume_mask > 0])
+    sum_ppmm = np.nansum(plume_mask[plume_mask > 0])
+    min_ppmm = np.nanmin(plume_mask)
+    brightest_99prc = np.nanpercentile(plume_mask, 99)
+    num_plume_pixels = np.count_nonzero(plume_mask > 0)
+     
+    if visualize_flag:
+        plt.hist(plume_mask.flatten(), bins=50)
+        plt.show()
+    
+    plume_mask[np.isnan(plume_mask)] = 0
+    
+    if visualize_flag:
+        plt.imshow(plume_mask)
+        plt.show()
+        
+    ## Assign Density Category:
+    if max_ppmm < 275:
+        density_category = "very faint"
+    elif max_ppmm < 400:
+        density_category = "faint"
+    elif max_ppmm < 540:
+        density_category = "medium"
+    else:
+        density_category = "strong"
+        
+    ## Assign Peak Intensity Category:
+    if brightest_99prc < 975:
+        peak_intensity_category = "very dim"
+    elif brightest_99prc < 1400:
+        peak_intensity_category = "dim"
+    elif brightest_99prc < 1850:
+        peak_intensity_category = "medium"
+    else:
+        peak_intensity_category = "bright"
+        
+    ## Assign Size Category:
+    if num_plume_pixels < 225:
+        size_category = "small"
+    elif num_plume_pixels < 550:
+        size_category = "medium"
+    elif num_plume_pixels < 2600:
+        size_category = "large"
+    else:
+        size_category = "huge"
+        
+    ## Assign Training Category:
+    if (density_category == "strong" or density_category == "medium") and \
+        (peak_intensity_category == "bright" or peak_intensity_category == "medium") and \
+        (size_category == "medium" or size_category == "large"):
+        training_category = "easy"
+        
+    elif (density_category == "strong" or density_category == "medium" or density_category == "faint") and \
+        (peak_intensity_category == "bright" or peak_intensity_category == "medium" or peak_intensity_category == "dim") and \
+        (size_category == "medium" or size_category == "large"):
+        training_category = "medium"
+    
+    elif (density_category == "very faint" or density_category == "faint") and \
+        (peak_intensity_category == "very dim" or peak_intensity_category == "dim") and \
+        (size_category == "small" or size_category == "medium"):
+        training_category = "very_hard"
+        
+    elif (size_category == "huge"):
+        training_category = "huge_plume"
+    
+    else:
+        training_category = "hard"
+        
+    plume_stats_dict = {
+        "max_ppmm": max_ppmm.item(),
+        "mean_ppmm": mean_ppmm.item(),
+        "sum_ppmm": sum_ppmm.item(),
+        "num_plume_pixels": num_plume_pixels,
+        "peak_intensity": brightest_99prc.item(),
+        "density_category": density_category,
+        "peak_intensity_category": peak_intensity_category,
+        "size_category": size_category,
+        "training_category": training_category
+    }
+    
+    return plume_mask, plume_stats_dict
+
+
+def project_plume_mask(plume_tif, l1b_product):
+    ref = l1b_product["radiance"].isel(wavelengths=0)
+    ref = ref.rename({d: {"longitude": "x", "latitude": "y"}[d] for d in ref.dims if d in ("longitude", "latitude")})
+
+    # Ensure CRS exists (EMIT ortho products are lon/lat)
+    if ref.rio.crs is None:
+        ref = ref.rio.write_crs("EPSG:4326", inplace=False)
+    if plume_tif.rio.crs is None:
+        plume_tif = plume_tif.rio.write_crs(ref.rio.crs, inplace=False)
+        
+    plume_out = plume_tif.rio.reproject_match(ref, resampling=Resampling.nearest, nodata=np.nan)
+    plume_out.values[plume_out.values == -9999] = np.nan
+    
+    gc.collect()
+    return plume_out
+
+
+def chip_plume(l1b_product, plume_mask, mag1c_layer, l2b_enh, chip_size=256, step_size=16):
+    chip_size = int(chip_size)
+    step_size = int(step_size)
+    hypercube = l1b_product["radiance"]
+    mag1c_layer = mag1c_layer.values.copy()
+    plume_mask = plume_mask.values.copy()
+    l2b_enh = l2b_enh.values.copy()
+    
+    #Use max intensity as a root:
+    max_plume_coords = np.argwhere(plume_mask == np.nanmax(plume_mask))[0]
+    #print(max_plume_coords)
+    
+    ##Find chip which has the highest sum of l2b_enh intensity:
+    l2b_blur = gaussian_filter(l2b_enh, sigma=10)
+    
+    #Define search area:
+    img_max_x = l2b_blur.shape[0]
+    img_max_y = l2b_blur.shape[1]
+    min_x = max(0, max_plume_coords[0] - (chip_size))
+    max_x = min(img_max_x, max_plume_coords[0] + (chip_size))
+    min_y = max(0, max_plume_coords[1] - (chip_size))
+    max_y = min(img_max_y, max_plume_coords[1] + (chip_size))
+    
+    #Search for chip with max sum:
+    sums = []
+    indices = []
+    for x in range(min_x, max_x-chip_size, step_size):
+        for y in range(min_y, max_y-chip_size, step_size):
+            chip = l2b_blur[int(x):int(x+chip_size), int(y):int(y+chip_size)]
+            s = np.nansum(chip)
+            sums.append(s)
+            indices.append((x, y))
+            
+    max_sum_idx = np.argmax(sums)
+    max_sum_coords = indices[max_sum_idx]
+    
+    #Get chip:
+    chip_start_x = max_sum_coords[0]
+    chip_start_y = max_sum_coords[1]
+    
+    hypercube_chip = hypercube[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size), :]
+    mag1c_chip = mag1c_layer[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
+    l2b_enh_chip = l2b_enh[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
+    plume_mask_chip = plume_mask[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
+    plume_mask_chip[np.isnan(plume_mask_chip)] = 0
+    plume_mask_chip[plume_mask_chip == -9999] = 0
+    plume_mask_chip[plume_mask_chip < 0] = 0
+    
+    chip_plume_center_x = max_plume_coords[0] - chip_start_x
+    chip_plume_center_y = max_plume_coords[1] - chip_start_y
+    
+
+    gc.collect()
+    return hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y)
+    
+
+def chip_negatives(l1b_product, mag1c_layer, l2b_enh, chip_size=256, step_size=16, chips_to_generate=1, existing_positive_chips=[], display_chipping = False):
+    chip_size = int(chip_size)
+    step_size = int(step_size)
+    print("Generating " + str(chips_to_generate) + " negative chips")
+    hypercube = l1b_product["radiance"]
+    mag1c_layer = mag1c_layer.values.copy()
+    l2b_enh = l2b_enh.values.copy()
+
+    #Penalize chips that intersect with the -9999 invalid edges:
+    l2b_blur = l2b_enh.copy()
+    l2b_blur[l2b_blur == -9999] = 999999.
+    l2b_blur = gaussian_filter(l2b_blur, sigma=10)
+    
+    hypercube_chip_list = []
+    mag1c_chip_list = []
+    l2b_enh_chip_list = []
+    
+    #Heavily penalize chips that overlap with positive chips
+    if len(existing_positive_chips) > 0:
+        for chip in existing_positive_chips:
+            chip_start_x, chip_start_y = chip
+            #print(chip_start_x, chip_start_y)
+            l2b_blur[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)] = 9999999.
+                
+    for i in range(chips_to_generate):
+        if display_chipping:
+            plt.imshow(l2b_blur)
+            plt.show()
+        
+        sums = []
+        indices = []
+        for x in range(0, l2b_blur.shape[0]-chip_size, step_size):
+            for y in range(0, l2b_blur.shape[1]-chip_size, step_size):
+                chip = l2b_blur[x:x+chip_size, y:y+chip_size]
+                s = np.nansum(chip)
+                sums.append(s)
+                indices.append((x, y))
+                
+        min_sum_idx = np.argmin(sums)
+        min_sum_coords = indices[min_sum_idx]
+        #print(sums)
+        if np.min(sums) > 100000000:
+            print("No more negative chips can be generated from this granule")
+            break
+        
+        #Get chip:
+        chip_start_x = min_sum_coords[0]
+        chip_start_y = min_sum_coords[1]
+        
+        hypercube_chip = hypercube[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size), :]
+        mag1c_chip = mag1c_layer[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
+        l2b_enh_chip = l2b_enh[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
+        
+        hypercube_chip_list.append(hypercube_chip)
+        mag1c_chip_list.append(mag1c_chip)
+        l2b_enh_chip_list.append(l2b_enh_chip)
+        
+        l2b_blur[chip_start_x:chip_start_x+chip_size, chip_start_y:chip_start_y+chip_size] = 999999.
+    
+    gc.collect()
+    return hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list
+    
+
+def survey_plume_stats(max_count=100):
+    plume_results = search_l2b_metadata(date_range=('2023-01-01', '2025-12-31'), max_count=max_count, cloudcover_max=3)
+    granule_ids = get_unique_granule_ids(plume_results)
+    
+    rows = []
+    for granule_id in granule_ids:
+        _, l2b_tifs, _ = download_one_l2b_set(granule_id, onlytifs=True)
+        for l2b_tif in l2b_tifs:
+            _, plume_stats = get_plume_mask_and_stats(l2b_tif)
+            plume_stats["granule_id"] = granule_id
+            rows.append(plume_stats)
+
+    plume_df = pd.DataFrame(rows)
+    
+    # plume_df['cat_density'] = pd.cut(plume_df['mean_ppmm'], 
+    #                                 bins=[-np.inf, 275, 400, 540, np.inf], 
+    #                                 labels=['very faint', 'faint', 'medium', 'strong'])
+    # plume_df['cat_peak_intensity'] = pd.cut(plume_df['peak_intensity'], 
+    #                                         bins=[-np.inf, 975, 1400, 1850, np.inf], 
+    #                                         labels=['very dim', 'dim', 'medium', 'bright'])
+    # plume_df['cat_size'] = pd.cut(plume_df['num_plume_pixels'], 
+    #                               bins=[-np.inf, 225, 550, 2600, np.inf], 
+    #                               labels=['small', 'medium', 'large', 'huge'])
+    
+    plume_df.sort_values(by="max_ppmm", ascending=False, inplace=True)
+    
+    return plume_df
+    
+
+def collate_granule_metadata(granule_id, l1b_product, l2b_jsons):
+    granule_metadata = {
+        "attrs_flight_line": l1b_product.attrs["flight_line"],
+        "attrs_time": l1b_product.attrs["time_coverage_start"],
+        "attrs_day_night_flag": l1b_product.attrs["day_night_flag"],
+        "attrs_granule_id": l1b_product.attrs["granule_id"],
+        "attrs_spatial_ref": l1b_product.attrs["spatial_ref"],
+        "attrs_geotransform": l1b_product.attrs["geotransform"].tolist(),
+        
+        "num_plume_products": len(l2b_jsons),
+        "latitude": np.asarray(l1b_product["latitude"]).tolist(),
+        "longitude": np.asarray(l1b_product["longitude"]).tolist(),
+        "fwhm": np.asarray(l1b_product["fwhm"]).tolist(),
+        "wavelengths": np.asarray(l1b_product["wavelengths"]).tolist(),
+        "elev": np.asarray(l1b_product["elev"]).tolist(),
+        "spatial_ref": np.asarray(l1b_product["spatial_ref"]).tolist(),
+        # "geotransform": l1b_product["geotransform"].tolist(),
+        # "time": l1b_product["time_coverage_start"]
+    }
+    return granule_metadata
+
+
+def collate_plume_metadata(l2b_jsons, l2b_tifs):
+    plume_metadata_list = []
+    for l2b_json, l2b_tif in zip(l2b_jsons, l2b_tifs):
+        _, plume_stats = get_plume_mask_and_stats(l2b_tif)
+        plume_metadata = {}
+        plume_metadata["plume_id"] = l2b_json["Plume ID"][0]
+        plume_metadata["latitude"] = l2b_json["Latitude of max concentration"][0].item()
+        plume_metadata["longitude"] = l2b_json["Longitude of max concentration"][0].item()
+        plume_metadata["max_ppmm"] = l2b_json["Max Plume Concentration (ppm m)"][0].item()
+        
+        plume_metadata_list.append(plume_metadata | plume_stats)
+    return plume_metadata_list
+
+
+def save_hypercube(chip, path_without_ext, fmt="npy", dtype=np.float32):
+    """
+    Save a hypercube chip to disk in the specified format.
+    
+    Args:
+        chip:             numpy array or xarray DataArray (H, W, C)
+        path_without_ext: output path without file extension
+        fmt:              "npy" for memory-mappable .npy, "hdf5" for single-chip HDF5
+        dtype:            target dtype (default float32 to halve size vs float64)
+    
+    Returns:
+        The path to the written file (with extension).
+    """
+    data = np.asarray(chip, dtype=dtype)
+
+    if fmt == "npy":
+        out_path = path_without_ext + ".npy"
+        np.save(out_path, data)
+        return out_path
+
+    elif fmt == "hdf5":
+        import h5py
+        out_path = path_without_ext + ".h5"
+        with h5py.File(out_path, "w") as f:
+            f.create_dataset(
+                "hypercube",
+                data=data,
+                chunks=data.shape,
+                compression=None,
+            )
+        return out_path
+
+    else:
+        raise ValueError(f"Unknown format '{fmt}'. Supported: 'npy', 'hdf5'")
+
+
+def load_hypercube(path, fmt=None):
+    """
+    Load a hypercube chip from disk. Format is inferred from extension if not given.
+    
+    Args:
+        path: file path (with extension)
+        fmt:  "npy" or "hdf5". Inferred from extension if None.
+    
+    Returns:
+        numpy array (H, W, C). For npy, returns a read-only memory-mapped view.
+    """
+    if fmt is None:
+        if path.endswith(".npy"):
+            fmt = "npy"
+        elif path.endswith(".h5") or path.endswith(".hdf5"):
+            fmt = "hdf5"
+        else:
+            raise ValueError(f"Cannot infer format from extension: {path}")
+
+    if fmt == "npy":
+        return np.load(path, mmap_mode="r")
+
+    elif fmt == "hdf5":
+        import h5py
+        f = h5py.File(path, "r", swmr=True)
+        return f["hypercube"]
+
+    else:
+        raise ValueError(f"Unknown format '{fmt}'. Supported: 'npy', 'hdf5'")
+
+
+def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, overwrite = False, cube_format="npy"):
+    granule_dir = os.path.join(dataset_dir, granule_id)
+    granule_dir_if_mp = os.path.join(dataset_dir, granule_id + "_multiple_plumes")
+    if overwrite == False and os.path.exists(granule_dir):
+        print(f"Granule {granule_id} already exists in {dataset_dir}, skipping...")
+        return
+    if overwrite == False and os.path.exists(granule_dir_if_mp):
+        print(f"Granule {granule_id} already exists in {dataset_dir}, skipping...")
+        return
+    if granule_id in KNOWN_BAD_GRANULE_IDS:
+        print(f"Granule {granule_id} is known to be bad, skipping...")
+        return
+    
+    print(f"Saving granule {granule_id} to {dataset_dir}...")
+    l2b_jsons, l2b_tifs, l2b_enhs = download_one_l2b_set(granule_id)
+    
+    if len(l2b_jsons) == 0:
+        print(f"Granule {granule_id} has no plumes, skipping...")
+        return None
+    
+    if len(l2b_jsons) > 1:
+        granule_dir = granule_dir_if_mp
+    os.makedirs(granule_dir, exist_ok=True)
+    
+    l1b_prod, mag1c_output, _ = download_one_l1b_hypercube(granule_id)
+    
+    granule_metadata = collate_granule_metadata(granule_id, l1b_prod, l2b_jsons)
+    plume_metadata_list = collate_plume_metadata(l2b_jsons, l2b_tifs)
+    
+    with open(os.path.join(granule_dir, "granule_metadata.json"), "w") as f:
+        json.dump(granule_metadata, f)
+    
+    positive_chip_xy_list = []
+    for i, plume_metadata in enumerate(plume_metadata_list):
+        plume_mask_reprojected = project_plume_mask(l2b_tifs[i], l1b_prod)
+        hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y) = chip_plume(l1b_prod, plume_mask_reprojected, mag1c_output, l2b_enhs[0])
+        positive_chip_xy_list.append((chip_start_x, chip_start_y))
+        
+        plume_metadata["chip_plume_center_x"] = int(chip_plume_center_x)
+        plume_metadata["chip_plume_center_y"] = int(chip_plume_center_y)
+        _, plume_stats = get_plume_mask_and_stats(l2b_tifs[i])
+        plume_difficulty = plume_stats["training_category"]
+        
+        # print(plume_metadata["Plume ID"])
+        # print(plume_difficulty)
+        
+        plume_dir = os.path.join(granule_dir, plume_metadata["plume_id"] + "_" + plume_difficulty)
+        os.makedirs(plume_dir, exist_ok=True)
+        with open(os.path.join(plume_dir, "plume_metadata.json"), "w") as f:
+            json.dump(plume_metadata, f)
+        
+        #out_hypercube_path = os.path.join(plume_dir, "hypercube.npy")
+        out_mag1c_path = os.path.join(plume_dir, "mag1c.npy")
+        out_plume_mask_path = os.path.join(plume_dir, "plume_mask.npy")
+        out_l2b_enh_path = os.path.join(plume_dir, "l2b_enh.npy")
+        
+        save_hypercube(hypercube_chip, os.path.join(plume_dir, "hypercube"), fmt=cube_format)
+        np.save(out_mag1c_path, mag1c_chip)
+        np.save(out_plume_mask_path, plume_mask_chip)
+        np.save(out_l2b_enh_path, l2b_enh_chip)
+    
+        gc.collect()
+    
+    hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list = chip_negatives(l1b_prod, mag1c_output, l2b_enhs[0], chips_to_generate=len(l2b_jsons), existing_positive_chips=positive_chip_xy_list)
+    for i, (hypercube_chip, mag1c_chip, l2b_enh_chip) in enumerate(zip(hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list)):
+        os.makedirs(os.path.join(granule_dir, "negative_chip_" + str(i)), exist_ok=True)  
+        out_hypercube_path = os.path.join(granule_dir, "negative_chip_" + str(i), "hypercube.npy")
+        out_mag1c_path = os.path.join(granule_dir, "negative_chip_" + str(i), "mag1c.npy")
+        out_l2b_enh_path = os.path.join(granule_dir, "negative_chip_" + str(i), "l2b_enh.npy")
+        
+        save_hypercube(hypercube_chip, os.path.join(granule_dir, "negative_chip_" + str(i)), fmt=cube_format)
+        np.save(out_mag1c_path, mag1c_chip)
+        np.save(out_l2b_enh_path, l2b_enh_chip)
+    
+    # TODO: make this work with returning both positive and negative chips
+    # if return_chips:
+    #     return hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip
+
+
+
