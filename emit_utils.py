@@ -52,7 +52,8 @@ def get_plume_granule_ids(gas_type="CH4", date_range=('2022-08-01', '2026-12-31'
         short_name=short_names,
         temporal=date_range,
         cloud_cover=cloud_cover_range,
-        count=max_count
+        count=max_count,
+        version="002",
     )
     
     # Track IDs in separate sets to allow for intersection/union logic
@@ -234,7 +235,8 @@ def search_l2b_metadata(date_range=('2023-01-01', '2023-12-31'), max_count=10, c
         short_name=methane_plume_product_name,
         temporal=date_range,
         cloud_cover=(cloudcover_min, cloudcover_max),
-        count=max_count
+        count=max_count,
+        version="002",
     )
     print(f"Found {len(l2b_plume_results)} L2B Plume products")
     
@@ -303,7 +305,7 @@ def get_l2bs_for_granule_id(granule_id):
     """
     earthaccess.login(persist=True)
 
-    search_kwargs = dict(short_name="EMITL2BCH4PLM", granule_name=f"*{granule_id}*")
+    search_kwargs = dict(short_name="EMITL2BCH4PLM", version="002", granule_name=f"*{granule_id}*")
     plume_granules = earthaccess.search_data(**search_kwargs)
     
     search_kwargs = dict(short_name="EMITL2BCH4ENH", version="002", granule_name=f"*{granule_id}*")
