@@ -540,7 +540,12 @@ def chip_plume(l1b_product, plume_mask, l2b_enh, mag1c_layer=None, chip_size=256
     return hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y)
     
 
-def chip_negatives(l1b_product, l2b_enh, mag1c_layer=None, chip_size=256, step_size=16, chips_to_generate=1, existing_positive_chips=[], display_chipping = False):
+def chip_negatives(l1b_product, l2b_enh, mag1c_layer=None, chip_size=256, step_size=16, chips_to_generate=1, 
+                   existing_positive_chips=None, display_chipping = False):
+    
+    if existing_positive_chips is None:
+        existing_positive_chips = []
+        
     chip_size = int(chip_size)
     step_size = int(step_size)
     print("Generating " + str(chips_to_generate) + " negative chips")
@@ -701,7 +706,7 @@ def save_hypercube(chip, path_without_ext, fmt="npy", dtype=np.float32):
         raise ValueError(f"Unknown format '{fmt}'. Supported: 'npy', 'hdf5'")
 
 
-def load_hypercube(path, fmt=None):
+def load_hypercube(path, fmt=None):  #TODO: Handle file handle handling for h5 - leaks
     """
     Load a hypercube chip from disk. Format is inferred from extension if not given.
     
@@ -794,7 +799,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     for i, plume_metadata in enumerate(plume_metadata_list):
         plume_mask_reprojected = project_plume_mask(l2b_tifs[i], l1b_prod)
         hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y) = chip_plume(
-            l1b_prod, plume_mask_reprojected, mag1c_output, l2b_enhs[0], chip_size=chip_size)
+            l1b_prod, plume_mask_reprojected, l2b_enhs[0], mag1c_layer=mag1c_output, chip_size=chip_size)
         positive_chip_xy_list.append((chip_start_x, chip_start_y))
         
         plume_metadata["chip_plume_center_x"] = int(chip_plume_center_x)
@@ -825,7 +830,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         gc.collect()
     
     hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list, neg_chip_positions = chip_negatives(
-        l1b_prod, mag1c_output, l2b_enhs[0], chips_to_generate=len(l2b_jsons), existing_positive_chips=positive_chip_xy_list, chip_size=chip_size)
+        l1b_prod, l2b_enhs[0], mag1c_layer=mag1c_output, chips_to_generate=len(l2b_jsons), existing_positive_chips=positive_chip_xy_list, chip_size=chip_size)
     
     for i, (hypercube_chip, mag1c_chip, l2b_enh_chip) in enumerate(zip(hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list)):
         neg_dir = os.path.join(granule_dir, "negative_chip_" + str(i))
