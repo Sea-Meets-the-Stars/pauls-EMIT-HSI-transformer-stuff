@@ -225,21 +225,29 @@ def display_plume_previews(granule_id, gas_type="ch4"):
     plt.show()
     
 ## Get list of L2B products:
-def search_l2b_metadata(date_range=('2023-01-01', '2023-12-31'), max_count=10, cloudcover_max = 1, cloudcover_min = 0):
-    methane_plume_product_name = "EMITL2BCH4PLM"
+def search_l2b_metadata(date_range=('2023-01-01', '2023-12-31'), max_count=10, cloudcover_max=1, cloudcover_min=0, gas_type="ch4"):
+    gas_type = gas_type.lower()
+    if gas_type == "ch4":
+        short_names = ["EMITL2BCH4PLM"]
+    elif gas_type == "co2":
+        short_names = ["EMITL2BCO2PLM"]
+    elif gas_type in ["either", "both"]:
+        short_names = ["EMITL2BCH4PLM", "EMITL2BCO2PLM"]
+    else:
+        raise ValueError("gas_type must be 'ch4', 'co2', 'either', or 'both'")
+
     earthaccess.login(persist=True)
-    
-    ## Search for L2B Plume data
-    print(f"Searching for L2B Plume data in date range: {date_range}...")
+
+    print(f"Searching for {gas_type} L2B Plume data in date range: {date_range}...")
     l2b_plume_results = earthaccess.search_data(
-        short_name=methane_plume_product_name,
+        short_name=short_names,
         temporal=date_range,
         cloud_cover=(cloudcover_min, cloudcover_max),
         count=max_count,
         version="002",
     )
     print(f"Found {len(l2b_plume_results)} L2B Plume products")
-    
+
     return l2b_plume_results
 
 ## Get unique granule IDs:
@@ -266,7 +274,8 @@ def get_l1b_metadata(granule_ids):
     return l1b_products
 
 ## Download hypercube + run MAG1C and get metadata:
-def download_one_l1b_hypercube(granule_id, temp_dir="/more_data/temp_processing/emit_download/", show_progress=False):
+def download_one_l1b_hypercube(granule_id, temp_dir="/more_data/temp_processing/emit_download/", 
+                               show_progress=False, run_mag1c=True):
     earthaccess.login(persist=True)
     
     l1b_metadata = get_l1b_metadata([granule_id])
@@ -284,9 +293,11 @@ def download_one_l1b_hypercube(granule_id, temp_dir="/more_data/temp_processing/
         raise ValueError("No RAD file found in downloaded paths")
     print(rad_path)
     
-    rst = emit.EMITImage(rad_path)
-    mag1c_output, _ = mag1c_emit.mag1c_emit(rst, column_step=2, georreferenced=True)
-    del rst
+    mag1c_output = None
+    if run_mag1c:
+        rst = emit.EMITImage(rad_path)
+        mag1c_output, _ = mag1c_emit.mag1c_emit(rst, column_step=2, georreferenced=True)
+        del rst
     
     l1b_product = emit_xarray(rad_path, ortho=True)
         
@@ -298,25 +309,37 @@ def download_one_l1b_hypercube(granule_id, temp_dir="/more_data/temp_processing/
     return l1b_product, mag1c_output
 
 
-def get_l2bs_for_granule_id(granule_id):
+def get_l2bs_for_granule_id(granule_id, gas_type="ch4"):
     """
     granule_id: e.g. "20230107T143818" (the timestamp you extracted)
-    Returns stats computed over the union mosaic of all CH4PLM plume-complex GeoTIFFs for that granule_id.
+    gas_type: "ch4" or "co2"
+    Returns the plume complex and enhancement search results for the specified gas.
     """
     earthaccess.login(persist=True)
+    gas_type = gas_type.lower()
 
-    search_kwargs = dict(short_name="EMITL2BCH4PLM", version="002", granule_name=f"*{granule_id}*")
-    plume_granules = earthaccess.search_data(**search_kwargs)
-    
-    search_kwargs = dict(short_name="EMITL2BCH4ENH", version="002", granule_name=f"*{granule_id}*")
-    ch4_enh_layers = earthaccess.search_data(**search_kwargs)
+    if gas_type == "ch4":
+        plm_short_name = "EMITL2BCH4PLM"
+        enh_short_name = "EMITL2BCH4ENH"
+    elif gas_type == "co2":
+        plm_short_name = "EMITL2BCO2PLM"
+        enh_short_name = "EMITL2BCO2ENH"
+    else:
+        raise ValueError(f"gas_type must be 'ch4' or 'co2', got '{gas_type}'")
 
-    return plume_granules, ch4_enh_layers
+    plume_granules = earthaccess.search_data(
+        short_name=plm_short_name, version="002", granule_name=f"*{granule_id}*"
+    )
+    enh_layers = earthaccess.search_data(
+        short_name=enh_short_name, version="002", granule_name=f"*{granule_id}*"
+    )
+
+    return plume_granules, enh_layers
 
 
-def download_one_l2b_set(granule_id, temp_dir="/more_data/temp_processing/emit_download/", onlytifs=False, show_progress=False, 
-                         nasa_archive_dir=None):
-    l2b_plm_metas, l2b_enh_metas = get_l2bs_for_granule_id(granule_id)
+def download_one_l2b_set(granule_id, gas_type="ch4", temp_dir="/more_data/temp_processing/emit_download/", 
+                         onlytifs=False, show_progress=False, nasa_archive_dir=None):
+    l2b_plm_metas, l2b_enh_metas = get_l2bs_for_granule_id(granule_id, gas_type=gas_type)
     os.makedirs(temp_dir, exist_ok=True)
     downloaded_paths = earthaccess.download(l2b_plm_metas, temp_dir, show_progress=show_progress)
     l2b_jsons = []
@@ -341,7 +364,8 @@ def download_one_l2b_set(granule_id, temp_dir="/more_data/temp_processing/emit_d
     if not onlytifs:
         downloaded_paths = earthaccess.download(l2b_enh_metas, temp_dir, show_progress=show_progress)
         for path in downloaded_paths:
-            if os.path.basename(path).lower().endswith(".tif") and "CH4ENH" in os.path.basename(path):
+            enh_tag = "CH4ENH" if gas_type.lower() == "ch4" else "CO2ENH"
+            if os.path.basename(path).lower().endswith(".tif") and enh_tag in os.path.basename(path):
                 enh_layer = rioxarray.open_rasterio(path).squeeze("band", drop=True)
                 l2b_enhs.append(enh_layer)
                 
@@ -460,11 +484,11 @@ def project_plume_mask(plume_tif, l1b_product):
     return plume_out
 
 
-def chip_plume(l1b_product, plume_mask, mag1c_layer, l2b_enh, chip_size=256, step_size=16):
+def chip_plume(l1b_product, plume_mask, l2b_enh, mag1c_layer=None, chip_size=256, step_size=16):
     chip_size = int(chip_size)
     step_size = int(step_size)
     hypercube = l1b_product["radiance"]
-    mag1c_layer = mag1c_layer.values.copy()
+    mag1c_arr = mag1c_layer.values.copy() if mag1c_layer is not None else None
     plume_mask = plume_mask.values.copy()
     l2b_enh = l2b_enh.values.copy()
     
@@ -501,7 +525,7 @@ def chip_plume(l1b_product, plume_mask, mag1c_layer, l2b_enh, chip_size=256, ste
     chip_start_y = max_sum_coords[1]
     
     hypercube_chip = hypercube[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size), :]
-    mag1c_chip = mag1c_layer[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
+    mag1c_chip = mag1c_arr[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)] if mag1c_arr is not None else None
     l2b_enh_chip = l2b_enh[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
     plume_mask_chip = plume_mask[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
     plume_mask_chip[np.isnan(plume_mask_chip)] = 0
@@ -516,12 +540,12 @@ def chip_plume(l1b_product, plume_mask, mag1c_layer, l2b_enh, chip_size=256, ste
     return hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y)
     
 
-def chip_negatives(l1b_product, mag1c_layer, l2b_enh, chip_size=256, step_size=16, chips_to_generate=1, existing_positive_chips=[], display_chipping = False):
+def chip_negatives(l1b_product, l2b_enh, mag1c_layer=None, chip_size=256, step_size=16, chips_to_generate=1, existing_positive_chips=[], display_chipping = False):
     chip_size = int(chip_size)
     step_size = int(step_size)
     print("Generating " + str(chips_to_generate) + " negative chips")
     hypercube = l1b_product["radiance"]
-    mag1c_layer = mag1c_layer.values.copy()
+    mag1c_arr = mag1c_layer.values.copy() if mag1c_layer is not None else None
     l2b_enh = l2b_enh.values.copy()
 
     #Penalize chips that intersect with the -9999 invalid edges:
@@ -567,7 +591,7 @@ def chip_negatives(l1b_product, mag1c_layer, l2b_enh, chip_size=256, step_size=1
         chip_start_y = min_sum_coords[1]
         
         hypercube_chip = hypercube[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size), :]
-        mag1c_chip = mag1c_layer[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
+        mag1c_chip = mag1c_arr[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)] if mag1c_arr is not None else None
         l2b_enh_chip = l2b_enh[int(chip_start_x):int(chip_start_x+chip_size), int(chip_start_y):int(chip_start_y+chip_size)]
         
         hypercube_chip_list.append(hypercube_chip)
