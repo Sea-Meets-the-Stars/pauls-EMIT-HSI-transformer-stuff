@@ -727,7 +727,8 @@ def save_instrument_metadata(dataset_dir, l1b_product):
     return out_path
 
 
-def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, overwrite = False, cube_format="npy"):
+def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, overwrite = False, 
+                                cube_format="npy", chip_size=256):
     granule_dir = os.path.join(dataset_dir, granule_id)
     granule_dir_if_mp = os.path.join(dataset_dir, granule_id + "_multiple_plumes")
     if overwrite == False and os.path.exists(granule_dir):
@@ -766,14 +767,15 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     positive_chip_xy_list = []
     for i, plume_metadata in enumerate(plume_metadata_list):
         plume_mask_reprojected = project_plume_mask(l2b_tifs[i], l1b_prod)
-        hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y) = chip_plume(l1b_prod, plume_mask_reprojected, mag1c_output, l2b_enhs[0])
+        hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y) = chip_plume(
+            l1b_prod, plume_mask_reprojected, mag1c_output, l2b_enhs[0], chip_size=chip_size)
         positive_chip_xy_list.append((chip_start_x, chip_start_y))
         
         plume_metadata["chip_plume_center_x"] = int(chip_plume_center_x)
         plume_metadata["chip_plume_center_y"] = int(chip_plume_center_y)
         plume_metadata["chip_start_x"] = int(chip_start_x)
         plume_metadata["chip_start_y"] = int(chip_start_y)
-        plume_metadata["chip_size"] = 256
+        plume_metadata["chip_size"] = chip_size
         plume_difficulty = plume_metadata["training_category"]
         
         # print(plume_metadata["Plume ID"])
@@ -797,7 +799,8 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         gc.collect()
     
     hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list, neg_chip_positions = chip_negatives(
-        l1b_prod, mag1c_output, l2b_enhs[0], chips_to_generate=len(l2b_jsons), existing_positive_chips=positive_chip_xy_list)
+        l1b_prod, mag1c_output, l2b_enhs[0], chips_to_generate=len(l2b_jsons), existing_positive_chips=positive_chip_xy_list, chip_size=chip_size)
+    
     for i, (hypercube_chip, mag1c_chip, l2b_enh_chip) in enumerate(zip(hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list)):
         neg_dir = os.path.join(granule_dir, "negative_chip_" + str(i))
         os.makedirs(neg_dir, exist_ok=True)
@@ -808,7 +811,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "label": "negative",
             "chip_start_x": int(neg_chip_positions[i][0]),
             "chip_start_y": int(neg_chip_positions[i][1]),
-            "chip_size": 256,
+            "chip_size": chip_size,
         }
         with open(os.path.join(neg_dir, "chip_metadata.json"), "w") as f:
             json.dump(neg_metadata, f)
