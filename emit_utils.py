@@ -1,28 +1,21 @@
 ##Imports
-import sys, os, glob, gc
+import sys, os, gc
 import numpy as np
 import pandas as pd
 import json
+import shutil
 
 import requests
 from PIL import Image
 from io import BytesIO
 
 import earthaccess
-from georeader.readers import emit, download_utils
+from georeader.readers import emit
 import geopandas
 import rioxarray
-import geopandas as gpd
-import rioxarray as rxr
-from rioxarray.merge import merge_arrays
-from scipy.ndimage import gaussian_filter, binary_dilation
-from scipy.spatial import cKDTree
+from scipy.ndimage import gaussian_filter
 
-import rasterio.features
 from rasterio.enums import Resampling
-import xarray as xr
-import tempfile
-import netCDF4 as nc
 import matplotlib.pyplot as plt
 
 sys.path.append('./STARCOP/starcop')
@@ -319,7 +312,8 @@ def get_l2bs_for_granule_id(granule_id):
     return plume_granules, ch4_enh_layers
 
 
-def download_one_l2b_set(granule_id, temp_dir="/more_data/temp_processing/emit_download/", onlytifs=False, show_progress=False):
+def download_one_l2b_set(granule_id, temp_dir="/more_data/temp_processing/emit_download/", onlytifs=False, show_progress=False, 
+                         nasa_archive_dir=None):
     l2b_plm_metas, l2b_enh_metas = get_l2bs_for_granule_id(granule_id)
     os.makedirs(temp_dir, exist_ok=True)
     downloaded_paths = earthaccess.download(l2b_plm_metas, temp_dir, show_progress=show_progress)
@@ -333,9 +327,13 @@ def download_one_l2b_set(granule_id, temp_dir="/more_data/temp_processing/emit_d
             plume_mask = rioxarray.open_rasterio(path).squeeze("band", drop=True) #has only one band, drops that dim
             l2b_tifs.append(plume_mask)
             
-    #remove files in temp_dir:
-    for path in downloaded_paths:
-        os.remove(path)
+    if nasa_archive_dir is not None:
+        os.makedirs(nasa_archive_dir, exist_ok=True)
+        for path in downloaded_paths:
+            shutil.move(path, os.path.join(nasa_archive_dir, os.path.basename(path)))
+    else:
+        for path in downloaded_paths:
+            os.remove(path)
     
     l2b_enhs = []
     if not onlytifs:
@@ -344,10 +342,15 @@ def download_one_l2b_set(granule_id, temp_dir="/more_data/temp_processing/emit_d
             if os.path.basename(path).lower().endswith(".tif") and "CH4ENH" in os.path.basename(path):
                 enh_layer = rioxarray.open_rasterio(path).squeeze("band", drop=True)
                 l2b_enhs.append(enh_layer)
-        for path in downloaded_paths:
-            os.remove(path)
+                
+        if nasa_archive_dir is not None:
+            for path in downloaded_paths:
+                shutil.move(path, os.path.join(nasa_archive_dir, os.path.basename(path)))
+        else:
+            for path in downloaded_paths:
+                os.remove(path)
+                
     gc.collect()
-            
     return l2b_jsons, l2b_tifs, l2b_enhs
 
 
@@ -527,6 +530,7 @@ def chip_negatives(l1b_product, mag1c_layer, l2b_enh, chip_size=256, step_size=1
     hypercube_chip_list = []
     mag1c_chip_list = []
     l2b_enh_chip_list = []
+    chip_positions_list = []
     
     #Heavily penalize chips that overlap with positive chips
     if len(existing_positive_chips) > 0:
@@ -567,11 +571,12 @@ def chip_negatives(l1b_product, mag1c_layer, l2b_enh, chip_size=256, step_size=1
         hypercube_chip_list.append(hypercube_chip)
         mag1c_chip_list.append(mag1c_chip)
         l2b_enh_chip_list.append(l2b_enh_chip)
+        chip_positions_list.append((chip_start_x, chip_start_y))
         
         l2b_blur[chip_start_x:chip_start_x+chip_size, chip_start_y:chip_start_y+chip_size] = 999999.
     
     gc.collect()
-    return hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list
+    return hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list, chip_positions_list
     
 
 def survey_plume_stats(max_count=100):
@@ -603,38 +608,33 @@ def survey_plume_stats(max_count=100):
     return plume_df
     
 
-def collate_granule_metadata(granule_id, l1b_product, l2b_jsons):
+def collate_granule_metadata(granule_id, l1b_product, num_plumes):
+    radiance = l1b_product["radiance"]
     granule_metadata = {
-        "attrs_flight_line": l1b_product.attrs["flight_line"],
-        "attrs_time": l1b_product.attrs["time_coverage_start"],
-        "attrs_day_night_flag": l1b_product.attrs["day_night_flag"],
-        "attrs_granule_id": l1b_product.attrs["granule_id"],
-        "attrs_spatial_ref": l1b_product.attrs["spatial_ref"],
-        "attrs_geotransform": l1b_product.attrs["geotransform"].tolist(),
-        
-        "num_plume_products": len(l2b_jsons),
-        "latitude": np.asarray(l1b_product["latitude"]).tolist(),
-        "longitude": np.asarray(l1b_product["longitude"]).tolist(),
-        "fwhm": np.asarray(l1b_product["fwhm"]).tolist(),
+        "granule_id": granule_id,
+        "flight_line": l1b_product.attrs["flight_line"],
+        "time_coverage_start": l1b_product.attrs["time_coverage_start"],
+        "day_night_flag": l1b_product.attrs["day_night_flag"],
+        "crs": l1b_product.attrs["spatial_ref"],
+        "geotransform": l1b_product.attrs["geotransform"].tolist(),
+        "granule_height": int(radiance.shape[0]),
+        "granule_width": int(radiance.shape[1]),
+        "num_bands": int(radiance.shape[2]),
         "wavelengths": np.asarray(l1b_product["wavelengths"]).tolist(),
-        "elev": np.asarray(l1b_product["elev"]).tolist(),
-        "spatial_ref": np.asarray(l1b_product["spatial_ref"]).tolist(),
-        # "geotransform": l1b_product["geotransform"].tolist(),
-        # "time": l1b_product["time_coverage_start"]
+        "fwhm": np.asarray(l1b_product["fwhm"]).tolist(),
+        "num_plumes": num_plumes,
     }
     return granule_metadata
 
 
-def collate_plume_metadata(l2b_jsons, l2b_tifs):
+def collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id):
     plume_metadata_list = []
     for l2b_json, l2b_tif in zip(l2b_jsons, l2b_tifs):
         _, plume_stats = get_plume_mask_and_stats(l2b_tif)
-        plume_metadata = {}
-        plume_metadata["plume_id"] = l2b_json["Plume ID"][0]
-        plume_metadata["latitude"] = l2b_json["Latitude of max concentration"][0].item()
-        plume_metadata["longitude"] = l2b_json["Longitude of max concentration"][0].item()
-        plume_metadata["max_ppmm"] = l2b_json["Max Plume Concentration (ppm m)"][0].item()
-        
+        plume_metadata = {
+            "plume_id": l2b_json["Plume ID"][0],
+            "granule_id": granule_id,
+        }
         plume_metadata_list.append(plume_metadata | plume_stats)
     return plume_metadata_list
 
@@ -706,6 +706,27 @@ def load_hypercube(path, fmt=None):
         raise ValueError(f"Unknown format '{fmt}'. Supported: 'npy', 'hdf5'")
 
 
+def save_instrument_metadata(dataset_dir, l1b_product):
+    """
+    Write instrument-level metadata (wavelengths, fwhm) once for the entire dataset.
+    Skips writing if the file already exists.
+    """
+    out_path = os.path.join(dataset_dir, "instrument.json")
+    if os.path.exists(out_path):
+        return out_path
+
+    instrument_metadata = {
+        "wavelengths": np.asarray(l1b_product["wavelengths"]).tolist(),
+        "fwhm": np.asarray(l1b_product["fwhm"]).tolist(),
+        "num_bands": len(l1b_product["wavelengths"]),
+    }
+    os.makedirs(dataset_dir, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(instrument_metadata, f)
+
+    return out_path
+
+
 def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, overwrite = False, cube_format="npy"):
     granule_dir = os.path.join(dataset_dir, granule_id)
     granule_dir_if_mp = os.path.join(dataset_dir, granule_id + "_multiple_plumes")
@@ -719,24 +740,28 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         print(f"Granule {granule_id} is known to be bad, skipping...")
         return
     
-    print(f"Saving granule {granule_id} to {dataset_dir}...")
-    l2b_jsons, l2b_tifs, l2b_enhs = download_one_l2b_set(granule_id)
-    
-    if len(l2b_jsons) == 0:
-        print(f"Granule {granule_id} has no plumes, skipping...")
+    temp_download_dir = os.path.join(dataset_dir, "_temp_download")
+    l2b_jsons, l2b_tifs, l2b_enhs = download_one_l2b_set(
+        granule_id, temp_dir=temp_download_dir, nasa_archive_dir=temp_download_dir
+    )
+        
+    if len(l2b_jsons) == 0 or len(l2b_enhs) == 0:
+        print(f"Granule {granule_id} has no plumes or enhancements, skipping...")
+        shutil.rmtree(temp_download_dir, ignore_errors=True)
         return None
     
     if len(l2b_jsons) > 1:
         granule_dir = granule_dir_if_mp
     os.makedirs(granule_dir, exist_ok=True)
     
-    l1b_prod, mag1c_output, _ = download_one_l1b_hypercube(granule_id)
+    nasa_dir = os.path.join(granule_dir, "nasa_plumes")
+    shutil.move(temp_download_dir, nasa_dir)
     
-    granule_metadata = collate_granule_metadata(granule_id, l1b_prod, l2b_jsons)
-    plume_metadata_list = collate_plume_metadata(l2b_jsons, l2b_tifs)
+    l1b_prod, mag1c_output = download_one_l1b_hypercube(granule_id)
+    save_instrument_metadata(dataset_dir, l1b_prod)
     
-    with open(os.path.join(granule_dir, "granule_metadata.json"), "w") as f:
-        json.dump(granule_metadata, f)
+    granule_metadata = collate_granule_metadata(granule_id, l1b_prod, len(l2b_jsons))
+    plume_metadata_list = collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id)
     
     positive_chip_xy_list = []
     for i, plume_metadata in enumerate(plume_metadata_list):
@@ -746,8 +771,10 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         
         plume_metadata["chip_plume_center_x"] = int(chip_plume_center_x)
         plume_metadata["chip_plume_center_y"] = int(chip_plume_center_y)
-        _, plume_stats = get_plume_mask_and_stats(l2b_tifs[i])
-        plume_difficulty = plume_stats["training_category"]
+        plume_metadata["chip_start_x"] = int(chip_start_x)
+        plume_metadata["chip_start_y"] = int(chip_start_y)
+        plume_metadata["chip_size"] = 256
+        plume_difficulty = plume_metadata["training_category"]
         
         # print(plume_metadata["Plume ID"])
         # print(plume_difficulty)
@@ -769,20 +796,102 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     
         gc.collect()
     
-    hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list = chip_negatives(l1b_prod, mag1c_output, l2b_enhs[0], chips_to_generate=len(l2b_jsons), existing_positive_chips=positive_chip_xy_list)
+    hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list, neg_chip_positions = chip_negatives(
+        l1b_prod, mag1c_output, l2b_enhs[0], chips_to_generate=len(l2b_jsons), existing_positive_chips=positive_chip_xy_list)
     for i, (hypercube_chip, mag1c_chip, l2b_enh_chip) in enumerate(zip(hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list)):
-        os.makedirs(os.path.join(granule_dir, "negative_chip_" + str(i)), exist_ok=True)  
-        out_hypercube_path = os.path.join(granule_dir, "negative_chip_" + str(i), "hypercube.npy")
-        out_mag1c_path = os.path.join(granule_dir, "negative_chip_" + str(i), "mag1c.npy")
-        out_l2b_enh_path = os.path.join(granule_dir, "negative_chip_" + str(i), "l2b_enh.npy")
+        neg_dir = os.path.join(granule_dir, "negative_chip_" + str(i))
+        os.makedirs(neg_dir, exist_ok=True)
         
-        save_hypercube(hypercube_chip, os.path.join(granule_dir, "negative_chip_" + str(i)), fmt=cube_format)
-        np.save(out_mag1c_path, mag1c_chip)
-        np.save(out_l2b_enh_path, l2b_enh_chip)
+        neg_metadata = {
+            "chip_id": f"{granule_id}_neg_{i}",
+            "granule_id": granule_id,
+            "label": "negative",
+            "chip_start_x": int(neg_chip_positions[i][0]),
+            "chip_start_y": int(neg_chip_positions[i][1]),
+            "chip_size": 256,
+        }
+        with open(os.path.join(neg_dir, "chip_metadata.json"), "w") as f:
+            json.dump(neg_metadata, f)
+
+        save_hypercube(hypercube_chip, os.path.join(neg_dir, "hypercube"), fmt=cube_format)
+        np.save(os.path.join(neg_dir, "mag1c.npy"), mag1c_chip)
+        np.save(os.path.join(neg_dir, "l2b_enh.npy"), l2b_enh_chip)
     
-    # TODO: make this work with returning both positive and negative chips
-    # if return_chips:
-    #     return hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip
+    granule_metadata["num_positive_chips"] = len(positive_chip_xy_list)
+    granule_metadata["num_negative_chips"] = len(hypercube_chip_list)
+    with open(os.path.join(granule_dir, "granule_metadata.json"), "w") as f:
+        json.dump(granule_metadata, f)
+    
+    # Build returns:
+    index_rows = []
+    for i, plume_metadata in enumerate(plume_metadata_list):
+        plume_difficulty = plume_metadata["training_category"]
+        dir_name = plume_metadata["plume_id"] + "_" + plume_difficulty
+        index_rows.append({
+            "id": f"{granule_id}_{plume_metadata['plume_id']}",
+            "event_id": os.path.join(os.path.basename(granule_dir), dir_name),
+            "granule_id": granule_id,
+            "plume_id": plume_metadata["plume_id"],
+            "label": "positive",
+            "num_plume_pixels": plume_metadata["num_plume_pixels"],
+            "training_category": plume_difficulty,
+        })
+
+    for i in range(len(hypercube_chip_list)):
+        dir_name = "negative_chip_" + str(i)
+        index_rows.append({
+            "id": f"{granule_id}_neg_{i}",
+            "event_id": os.path.join(os.path.basename(granule_dir), dir_name),
+            "granule_id": granule_id,
+            "plume_id": None,
+            "label": "negative",
+            "num_plume_pixels": 0,
+            "training_category": None,
+        })
+
+    return pd.DataFrame(index_rows)
 
 
+def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False):
+    """
+    Build a complete dataset from a list of granule IDs.
 
+    Downloads and chips each granule, archives NASA files, writes all metadata,
+    and produces a dataset_index.csv for the training pipeline.
+
+    Args:
+        granule_ids:                list of granule ID strings (e.g. ['20230825T163454', ...])
+        dataset_dir:                root directory for the dataset
+        cube_format:                "npy" or "hdf5"
+        overwrite:                  if False, skip granules whose directories already exist
+    
+    Returns:
+        The full dataset index as a pandas DataFrame.
+    """
+    os.makedirs(dataset_dir, exist_ok=True)
+
+    all_index_dfs = []
+    for i, granule_id in enumerate(granule_ids):
+        print(f"\n[{i+1}/{len(granule_ids)}] Processing granule {granule_id}...")
+        try:
+            result = save_one_granule_to_dataset(
+                granule_id, dataset_dir, overwrite=overwrite, cube_format=cube_format
+            )
+            if result is not None and isinstance(result, pd.DataFrame):
+                all_index_dfs.append(result)
+
+        except Exception as e:
+            print(f"  ERROR processing {granule_id}: {e}")
+            continue
+
+    if len(all_index_dfs) == 0:
+        print("No granules were successfully processed.")
+        return pd.DataFrame()
+
+    dataset_index = pd.concat(all_index_dfs, ignore_index=True)
+    csv_path = os.path.join(dataset_dir, "dataset_index.csv")
+    dataset_index.to_csv(csv_path, index=False)
+    print(f"\nDataset complete: {len(dataset_index)} chips across {len(all_index_dfs)} granules.")
+    print(f"Index written to {csv_path}")
+
+    return dataset_index
