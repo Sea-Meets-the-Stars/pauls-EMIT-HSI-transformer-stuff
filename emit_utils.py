@@ -375,13 +375,23 @@ def download_one_l2b_set(granule_id, gas_type="ch4", temp_dir="/more_data/temp_p
             os.remove(path)
     
     l2b_enhs = []
+    l2b_uncerts = []
+    l2b_sens = []
     if not onlytifs:
         downloaded_paths = earthaccess.download(l2b_enh_metas, temp_dir, show_progress=show_progress)
         for path in downloaded_paths:
+            basename = os.path.basename(path)
+            if not basename.lower().endswith(".tif"):
+                continue
             enh_tag = "CH4ENH" if gas_type.lower() == "ch4" else "CO2ENH"
-            if os.path.basename(path).lower().endswith(".tif") and enh_tag in os.path.basename(path):
-                enh_layer = rioxarray.open_rasterio(path).squeeze("band", drop=True)
-                l2b_enhs.append(enh_layer)
+            uncert_tag = "CH4UNCERT" if gas_type.lower() == "ch4" else "CO2UNCERT"
+            sens_tag = "CH4SENS" if gas_type.lower() == "ch4" else "CO2SENS"
+            if enh_tag in basename:
+                l2b_enhs.append(rioxarray.open_rasterio(path).squeeze("band", drop=True))
+            elif uncert_tag in basename:
+                l2b_uncerts.append(rioxarray.open_rasterio(path).squeeze("band", drop=True))
+            elif sens_tag in basename:
+                l2b_sens.append(rioxarray.open_rasterio(path).squeeze("band", drop=True))
                 
         if nasa_archive_dir is not None:
             for path in downloaded_paths:
@@ -391,8 +401,77 @@ def download_one_l2b_set(granule_id, gas_type="ch4", temp_dir="/more_data/temp_p
                 os.remove(path)
                 
     gc.collect()
-    return l2b_jsons, l2b_tifs, l2b_enhs
+    return l2b_jsons, l2b_tifs, l2b_enhs, l2b_uncerts, l2b_sens
 
+def compute_plume_metrics(enh_array, uncert_array, sens_array, plume_mask):
+    """
+    Computes four dataset-generation difficulty metrics for an EMIT GHG plume.
+
+    Parameters
+    ----------
+    enh_array : np.ndarray
+        Enhancement array (e.g. EMIT_L2B_CH4ENH or CO2ENH) in ppm*m.
+    uncert_array : np.ndarray
+        Uncertainty array (e.g. EMIT_L2B_CH4UNCERT or CO2UNCERT) in ppm*m.
+    sens_array : np.ndarray
+        Sensitivity array (e.g. EMIT_L2B_CH4SENS or CO2SENS), unitless.
+    plume_mask : np.ndarray
+        Binary mask; 1 (or >0) = plume, 0 = background. Same shape as the other arrays.
+
+    Returns
+    -------
+    dict
+        Keys: Radiometric_Clarity, Optical_Favourability, Geometric_Prominence,
+        Contextual_Heterogeneity. Values are float or np.floating; NaN where not defined.
+    """
+    plume_mask = np.asarray(plume_mask)
+    enh_array = np.asarray(enh_array, dtype=np.float64)
+    uncert_array = np.asarray(uncert_array, dtype=np.float64)
+    sens_array = np.asarray(sens_array, dtype=np.float64)
+
+    plume_bool = (plume_mask > 0) & np.isfinite(plume_mask)
+    background_bool = ~plume_bool
+
+    n_plume = np.sum(plume_bool)
+    n_background = np.sum(background_bool)
+
+    out = {}
+
+    # 1. Radiometric Clarity: max(Signal/Uncertainty) over plume (safe division)
+    if n_plume == 0:
+        out["Radiometric_Clarity"] = np.nan
+    else:
+        enh_plume = enh_array[plume_bool]
+        uncert_plume = uncert_array[plume_bool]
+        valid = np.isfinite(enh_plume) & np.isfinite(uncert_plume) & (uncert_plume > 0)
+        if np.any(valid):
+            sur = np.where(valid, enh_plume / uncert_plume, np.nan)
+            out["Radiometric_Clarity"] = np.nanmax(sur)
+        else:
+            out["Radiometric_Clarity"] = np.nan
+
+    # 2. Optical Favourability: mean sensitivity over plume
+    if n_plume == 0:
+        out["Optical_Favourability"] = np.nan
+    else:
+        sens_plume = sens_array[plume_bool]
+        out["Optical_Favourability"] = np.nanmean(sens_plume)
+
+    # 3. Geometric Prominence: total plume area (pixels, 60 m x 60 m each)
+    out["Geometric_Prominence"] = float(np.sum(plume_mask > 0))
+
+    # 4. Contextual Heterogeneity: std(enhancement) over background
+    if n_background == 0:
+        out["Contextual_Heterogeneity"] = np.nan
+    else:
+        enh_bg = enh_array[background_bool]
+        finite = np.isfinite(enh_bg)
+        if np.sum(finite) < 2:
+            out["Contextual_Heterogeneity"] = np.nan
+        else:
+            out["Contextual_Heterogeneity"] = np.nanstd(enh_bg)
+
+    return out
 
 def get_plume_mask_and_stats(plume_tif, visualize_flag=False, gas_type="ch4"):
     plume_mask = plume_tif.values.copy()
@@ -648,7 +727,7 @@ def survey_plume_stats(max_count=100, gas_type="ch4"):
     
     rows = []
     for granule_id in granule_ids:
-        _, l2b_tifs, _ = download_one_l2b_set(granule_id, onlytifs=True, gas_type=gas_type)
+        _, l2b_tifs, _, _, _ = download_one_l2b_set(granule_id, onlytifs=True, gas_type=gas_type)
         for l2b_tif in l2b_tifs:
             _, plume_stats = get_plume_mask_and_stats(l2b_tif, gas_type=gas_type)
             plume_stats["granule_id"] = granule_id
@@ -799,7 +878,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         return
     
     temp_download_dir = os.path.join(dataset_dir, "_temp_download")
-    l2b_jsons, l2b_tifs, l2b_enhs = download_one_l2b_set(
+    l2b_jsons, l2b_tifs, l2b_enhs, l2b_uncerts, l2b_sens = download_one_l2b_set(
         granule_id, temp_dir=temp_download_dir, nasa_archive_dir=temp_download_dir, gas_type=gas_type
     )
         
