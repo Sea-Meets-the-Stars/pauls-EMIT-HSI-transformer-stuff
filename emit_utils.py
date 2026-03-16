@@ -27,6 +27,20 @@ from emit_tools import emit_xarray
 
 KNOWN_BAD_GRANULE_IDS = ["20240812T213914"]
 
+#Quantile thresholds:
+PLUME_THRESHOLDS = {
+    "ch4": {
+        "density": [275, 400, 540],
+        "peak_intensity": [975, 1400, 1850],
+        "size": [225, 550, 2600],
+    },
+    "co2": {
+        "density": [None, None, None],
+        "peak_intensity": [None, None, None],
+        "size": [225, 550, 2600],
+    },
+}
+#TODO: Calculate co2 thresholds using survey_plume_stats()
 
 def get_plume_granule_ids(gas_type="CH4", date_range=('2022-08-01', '2026-12-31'), max_count=100, cloud_cover_range=(0, 5)):
     """
@@ -380,7 +394,7 @@ def download_one_l2b_set(granule_id, gas_type="ch4", temp_dir="/more_data/temp_p
     return l2b_jsons, l2b_tifs, l2b_enhs
 
 
-def get_plume_mask_and_stats(plume_tif, visualize_flag=False):
+def get_plume_mask_and_stats(plume_tif, visualize_flag=False, gas_type="ch4"):
     plume_mask = plume_tif.values.copy()
     plume_mask[plume_mask == -9999] = np.nan
     max_ppmm = np.nanmax(plume_mask)
@@ -400,32 +414,50 @@ def get_plume_mask_and_stats(plume_tif, visualize_flag=False):
         plt.imshow(plume_mask)
         plt.show()
         
+    thresholds = PLUME_THRESHOLDS.get(gas_type.lower())
+    #Handle case where thresholds are not set:
+    if thresholds is None or any(t is None for t in thresholds["density"]):
+        plume_stats_dict = {
+            "max_ppmm": max_ppmm.item(),
+            "mean_ppmm": mean_ppmm.item(),
+            "sum_ppmm": sum_ppmm.item(),
+            "num_plume_pixels": num_plume_pixels,
+            "peak_intensity": brightest_99prc.item(),
+            "density_category": "uncategorized",
+            "peak_intensity_category": "uncategorized",
+            "size_category": "uncategorized",
+            "training_category": "uncategorized",
+        }
+        return plume_mask, plume_stats_dict
+    
+    d = thresholds["density"]
+    p = thresholds["peak_intensity"]
+    s = thresholds["size"]
+    
     ## Assign Density Category:
-    if max_ppmm < 275:
+    if max_ppmm < d[0]:
         density_category = "very faint"
-    elif max_ppmm < 400:
+    elif max_ppmm < d[1]:
         density_category = "faint"
-    elif max_ppmm < 540:
+    elif max_ppmm < d[2]:
         density_category = "medium"
     else:
         density_category = "strong"
         
-    ## Assign Peak Intensity Category:
-    if brightest_99prc < 975:
+    if brightest_99prc < p[0]:
         peak_intensity_category = "very dim"
-    elif brightest_99prc < 1400:
+    elif brightest_99prc < p[1]:
         peak_intensity_category = "dim"
-    elif brightest_99prc < 1850:
+    elif brightest_99prc < p[2]:
         peak_intensity_category = "medium"
     else:
         peak_intensity_category = "bright"
         
-    ## Assign Size Category:
-    if num_plume_pixels < 225:
+    if num_plume_pixels < s[0]:
         size_category = "small"
-    elif num_plume_pixels < 550:
+    elif num_plume_pixels < s[1]:
         size_category = "medium"
-    elif num_plume_pixels < 2600:
+    elif num_plume_pixels < s[2]:
         size_category = "large"
     else:
         size_category = "huge"
@@ -610,36 +642,26 @@ def chip_negatives(l1b_product, l2b_enh, mag1c_layer=None, chip_size=256, step_s
     return hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list, chip_positions_list
     
 
-def survey_plume_stats(max_count=100):
-    plume_results = search_l2b_metadata(date_range=('2023-01-01', '2025-12-31'), max_count=max_count, cloudcover_max=3)
+def survey_plume_stats(max_count=100, gas_type="ch4"):
+    plume_results = search_l2b_metadata(date_range=('2023-01-01', '2025-12-31'), max_count=max_count, cloudcover_max=3, gas_type=gas_type)
     granule_ids = get_unique_granule_ids(plume_results)
     
     rows = []
     for granule_id in granule_ids:
-        _, l2b_tifs, _ = download_one_l2b_set(granule_id, onlytifs=True)
+        _, l2b_tifs, _ = download_one_l2b_set(granule_id, onlytifs=True, gas_type=gas_type)
         for l2b_tif in l2b_tifs:
-            _, plume_stats = get_plume_mask_and_stats(l2b_tif)
+            _, plume_stats = get_plume_mask_and_stats(l2b_tif, gas_type=gas_type)
             plume_stats["granule_id"] = granule_id
+            plume_stats["gas_type"] = gas_type
             rows.append(plume_stats)
 
     plume_df = pd.DataFrame(rows)
-    
-    # plume_df['cat_density'] = pd.cut(plume_df['mean_ppmm'], 
-    #                                 bins=[-np.inf, 275, 400, 540, np.inf], 
-    #                                 labels=['very faint', 'faint', 'medium', 'strong'])
-    # plume_df['cat_peak_intensity'] = pd.cut(plume_df['peak_intensity'], 
-    #                                         bins=[-np.inf, 975, 1400, 1850, np.inf], 
-    #                                         labels=['very dim', 'dim', 'medium', 'bright'])
-    # plume_df['cat_size'] = pd.cut(plume_df['num_plume_pixels'], 
-    #                               bins=[-np.inf, 225, 550, 2600, np.inf], 
-    #                               labels=['small', 'medium', 'large', 'huge'])
-    
     plume_df.sort_values(by="max_ppmm", ascending=False, inplace=True)
     
     return plume_df
     
 
-def collate_granule_metadata(granule_id, l1b_product, num_plumes):
+def collate_granule_metadata(granule_id, l1b_product, num_plumes, gas_type="ch4"):
     radiance = l1b_product["radiance"]
     granule_metadata = {
         "granule_id": granule_id,
@@ -654,17 +676,19 @@ def collate_granule_metadata(granule_id, l1b_product, num_plumes):
         "wavelengths": np.asarray(l1b_product["wavelengths"]).tolist(),
         "fwhm": np.asarray(l1b_product["fwhm"]).tolist(),
         "num_plumes": num_plumes,
+        "gas_type": gas_type,
     }
     return granule_metadata
 
 
-def collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id):
+def collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id, gas_type="ch4"):
     plume_metadata_list = []
     for l2b_json, l2b_tif in zip(l2b_jsons, l2b_tifs):
-        _, plume_stats = get_plume_mask_and_stats(l2b_tif)
+        _, plume_stats = get_plume_mask_and_stats(l2b_tif, gas_type=gas_type)
         plume_metadata = {
             "plume_id": l2b_json["Plume ID"][0],
             "granule_id": granule_id,
+            "gas_type": gas_type,
         }
         plume_metadata_list.append(plume_metadata | plume_stats)
     return plume_metadata_list
@@ -759,9 +783,11 @@ def save_instrument_metadata(dataset_dir, l1b_product):
 
 
 def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, overwrite = False, 
-                                cube_format="npy", chip_size=256):
-    granule_dir = os.path.join(dataset_dir, granule_id)
-    granule_dir_if_mp = os.path.join(dataset_dir, granule_id + "_multiple_plumes")
+                                cube_format="npy", chip_size=256, gas_type="ch4"):
+    granule_dir = os.path.join(dataset_dir, f"{granule_id}_{gas_type}")
+    granule_dir_if_mp = os.path.join(dataset_dir, f"{granule_id}_{gas_type}_multiple_plumes")
+    run_mag1c = (gas_type == "ch4")
+
     if overwrite == False and os.path.exists(granule_dir):
         print(f"Granule {granule_id} already exists in {dataset_dir}, skipping...")
         return
@@ -774,7 +800,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     
     temp_download_dir = os.path.join(dataset_dir, "_temp_download")
     l2b_jsons, l2b_tifs, l2b_enhs = download_one_l2b_set(
-        granule_id, temp_dir=temp_download_dir, nasa_archive_dir=temp_download_dir
+        granule_id, temp_dir=temp_download_dir, nasa_archive_dir=temp_download_dir, gas_type=gas_type
     )
         
     if len(l2b_jsons) == 0 or len(l2b_enhs) == 0:
@@ -789,11 +815,11 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     nasa_dir = os.path.join(granule_dir, "nasa_plumes")
     shutil.move(temp_download_dir, nasa_dir)
     
-    l1b_prod, mag1c_output = download_one_l1b_hypercube(granule_id)
+    l1b_prod, mag1c_output = download_one_l1b_hypercube(granule_id, run_mag1c=run_mag1c) 
     save_instrument_metadata(dataset_dir, l1b_prod)
     
-    granule_metadata = collate_granule_metadata(granule_id, l1b_prod, len(l2b_jsons))
-    plume_metadata_list = collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id)
+    granule_metadata = collate_granule_metadata(granule_id, l1b_prod, len(l2b_jsons), gas_type=gas_type)
+    plume_metadata_list = collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id, gas_type=gas_type)
     
     positive_chip_xy_list = []
     for i, plume_metadata in enumerate(plume_metadata_list):
@@ -807,6 +833,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         plume_metadata["chip_start_x"] = int(chip_start_x)
         plume_metadata["chip_start_y"] = int(chip_start_y)
         plume_metadata["chip_size"] = chip_size
+        plume_metadata["gas_type"] = gas_type
         plume_difficulty = plume_metadata["training_category"]
         
         # print(plume_metadata["Plume ID"])
@@ -823,7 +850,8 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         out_l2b_enh_path = os.path.join(plume_dir, "l2b_enh.npy")
         
         save_hypercube(hypercube_chip, os.path.join(plume_dir, "hypercube"), fmt=cube_format)
-        np.save(out_mag1c_path, mag1c_chip)
+        if run_mag1c:
+            np.save(out_mag1c_path, mag1c_chip)
         np.save(out_plume_mask_path, plume_mask_chip)
         np.save(out_l2b_enh_path, l2b_enh_chip)
     
@@ -843,12 +871,14 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "chip_start_x": int(neg_chip_positions[i][0]),
             "chip_start_y": int(neg_chip_positions[i][1]),
             "chip_size": chip_size,
+            "gas_type": gas_type,
         }
         with open(os.path.join(neg_dir, "chip_metadata.json"), "w") as f:
             json.dump(neg_metadata, f)
 
         save_hypercube(hypercube_chip, os.path.join(neg_dir, "hypercube"), fmt=cube_format)
-        np.save(os.path.join(neg_dir, "mag1c.npy"), mag1c_chip)
+        if run_mag1c:
+            np.save(os.path.join(neg_dir, "mag1c.npy"), mag1c_chip)
         np.save(os.path.join(neg_dir, "l2b_enh.npy"), l2b_enh_chip)
     
     granule_metadata["num_positive_chips"] = len(positive_chip_xy_list)
@@ -869,6 +899,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "label": "positive",
             "num_plume_pixels": plume_metadata["num_plume_pixels"],
             "training_category": plume_difficulty,
+            "gas_type": gas_type,
         })
 
     for i in range(len(hypercube_chip_list)):
@@ -881,12 +912,13 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "label": "negative",
             "num_plume_pixels": 0,
             "training_category": None,
+            "gas_type": gas_type,
         })
 
     return pd.DataFrame(index_rows)
 
 
-def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False):
+def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, gas_type="ch4"):
     """
     Build a complete dataset from a list of granule IDs.
 
@@ -898,6 +930,7 @@ def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False):
         dataset_dir:                root directory for the dataset
         cube_format:                "npy" or "hdf5"
         overwrite:                  if False, skip granules whose directories already exist
+        gas_type:                   "ch4" or "co2"
     
     Returns:
         The full dataset index as a pandas DataFrame.
@@ -906,10 +939,10 @@ def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False):
 
     all_index_dfs = []
     for i, granule_id in enumerate(granule_ids):
-        print(f"\n[{i+1}/{len(granule_ids)}] Processing granule {granule_id}...")
+        print(f"\n[{i+1}/{len(granule_ids)}] Processing {gas_type.upper()} granule {granule_id}...")
         try:
             result = save_one_granule_to_dataset(
-                granule_id, dataset_dir, overwrite=overwrite, cube_format=cube_format
+                granule_id, dataset_dir, overwrite=overwrite, cube_format=cube_format, gas_type=gas_type
             )
             if result is not None and isinstance(result, pd.DataFrame):
                 all_index_dfs.append(result)
