@@ -8,6 +8,7 @@ import shutil
 import requests
 from PIL import Image
 from io import BytesIO
+import tempfile
 
 import earthaccess
 from georeader.readers import emit
@@ -18,10 +19,10 @@ from scipy.ndimage import gaussian_filter
 from rasterio.enums import Resampling
 import matplotlib.pyplot as plt
 
-sys.path.append('./STARCOP/starcop')
+sys.path.append('../STARCOP/starcop')
 from starcop.models import mag1c_emit
 
-sys.path.append("./EMIT-Data-Resources/python/modules")
+sys.path.append("../EMIT-Data-Resources/python/modules")
 from emit_tools import emit_xarray
 
 
@@ -595,6 +596,46 @@ def project_plume_mask(plume_tif, l1b_product):
     return plume_out
 
 
+def align_plume_to_enh_grid(plume_tif, l2b_enh, l2b_uncert, l2b_sens):
+    """
+    Reproject the plume mask raster to the ENH grid and return aligned numpy arrays
+    suitable for compute_plume_metrics(enh, uncert, sens, plume_mask).
+
+    Parameters
+    ----------
+    plume_tif : rioxarray.DataArray
+        Plume mask TIF (may use -9999 nodata; plume pixels are > 0).
+    l2b_enh, l2b_uncert, l2b_sens : rioxarray.DataArray
+        Enhancement, uncertainty, and sensitivity rasters on a common grid.
+
+    Returns
+    -------
+    plume_mask_binary : np.ndarray
+        1 = plume, 0 = background. Same shape as ENH.
+    enh_arr, uncert_arr, sens_arr : np.ndarray
+        float64 arrays on the ENH grid, same shape as plume_mask_binary.
+    """
+    ref = l2b_enh
+    if ref.rio.crs is None:
+        ref = ref.rio.write_crs("EPSG:4326", inplace=False)
+    if plume_tif.rio.crs is None:
+        plume_tif = plume_tif.rio.write_crs(ref.rio.crs, inplace=False)
+
+    plume_reproj = plume_tif.rio.reproject_match(
+        ref, resampling=Resampling.nearest, nodata=np.nan
+    )
+    plume_vals = plume_reproj.values.copy()
+    plume_vals[plume_vals == -9999] = np.nan
+    plume_vals[np.isnan(plume_vals)] = 0
+    plume_mask_binary = (plume_vals > 0).astype(np.int64)
+
+    enh_arr = np.asarray(l2b_enh.values, dtype=np.float64)
+    uncert_arr = np.asarray(l2b_uncert.values, dtype=np.float64)
+    sens_arr = np.asarray(l2b_sens.values, dtype=np.float64)
+
+    return plume_mask_binary, enh_arr, uncert_arr, sens_arr
+
+
 def chip_plume(l1b_product, plume_mask, l2b_enh, mag1c_layer=None, chip_size=256, step_size=16):
     chip_size = int(chip_size)
     step_size = int(step_size)
@@ -721,22 +762,97 @@ def chip_negatives(l1b_product, l2b_enh, mag1c_layer=None, chip_size=256, step_s
     return hypercube_chip_list, mag1c_chip_list, l2b_enh_chip_list, chip_positions_list
     
 
-def survey_plume_stats(max_count=100, gas_type="ch4"):
-    plume_results = search_l2b_metadata(date_range=('2023-01-01', '2025-12-31'), max_count=max_count, cloudcover_max=3, gas_type=gas_type)
+def survey_plume_stats(
+    max_count=100,
+    gas_type="ch4",
+    include_difficulty_metrics=False,
+    temp_dir=None,
+):
+    """
+    Survey plume statistics across L2B plume products.
+
+    Parameters
+    ----------
+    max_count, gas_type : passed to search_l2b_metadata.
+    include_difficulty_metrics : bool
+        If False (default), only downloads plume-mask TIFs (fast). Same as before.
+        If True, also downloads ENH/UNCERT/SENS for each granule and adds the four
+        difficulty metrics (Radiometric_Clarity, Optical_Favourability,
+        Geometric_Prominence, Contextual_Heterogeneity) per plume row.
+    temp_dir : str or None
+        When include_difficulty_metrics is True, directory used for Earthdata
+        downloads. If None, a temporary directory is created per granule and removed
+        after processing that granule.
+    """
+    plume_results = search_l2b_metadata(
+        date_range=("2023-01-01", "2025-12-31"),
+        max_count=max_count,
+        cloudcover_max=3,
+        gas_type=gas_type,
+    )
     granule_ids = get_unique_granule_ids(plume_results)
-    
+
     rows = []
     for granule_id in granule_ids:
-        _, l2b_tifs, _, _, _ = download_one_l2b_set(granule_id, onlytifs=True, gas_type=gas_type)
-        for l2b_tif in l2b_tifs:
-            _, plume_stats = get_plume_mask_and_stats(l2b_tif, gas_type=gas_type)
-            plume_stats["granule_id"] = granule_id
-            plume_stats["gas_type"] = gas_type
-            rows.append(plume_stats)
+        if include_difficulty_metrics:
+            td = temp_dir if temp_dir is not None else tempfile.mkdtemp(
+                prefix=f"emit_survey_{granule_id}_"
+            )
+            try:
+                (
+                    _l2b_jsons,
+                    l2b_tifs,
+                    l2b_enhs,
+                    l2b_uncerts,
+                    l2b_sens,
+                ) = download_one_l2b_set(
+                    granule_id,
+                    onlytifs=False,
+                    gas_type=gas_type,
+                    temp_dir=td,
+                )
+            finally:
+                if temp_dir is None:
+                    shutil.rmtree(td, ignore_errors=True)
+
+            have_layers = (
+                len(l2b_enhs) > 0
+                and len(l2b_uncerts) > 0
+                and len(l2b_sens) > 0
+            )
+            for l2b_tif in l2b_tifs:
+                _, plume_stats = get_plume_mask_and_stats(l2b_tif, gas_type=gas_type)
+                plume_stats["granule_id"] = granule_id
+                plume_stats["gas_type"] = gas_type
+                if have_layers:
+                    plume_mask_binary, enh_arr, uncert_arr, sens_arr = (
+                        align_plume_to_enh_grid(
+                            l2b_tif,
+                            l2b_enhs[0],
+                            l2b_uncerts[0],
+                            l2b_sens[0],
+                        )
+                    )
+                    difficulty_metrics = compute_plume_metrics(
+                        enh_arr, uncert_arr, sens_arr, plume_mask_binary
+                    )
+                    for k, v in difficulty_metrics.items():
+                        difficulty_metrics[k] = float(v) if np.isscalar(v) else v
+                    plume_stats = plume_stats | difficulty_metrics
+                rows.append(plume_stats)
+        else:
+            _, l2b_tifs, _, _, _ = download_one_l2b_set(
+                granule_id, onlytifs=True, gas_type=gas_type
+            )
+            for l2b_tif in l2b_tifs:
+                _, plume_stats = get_plume_mask_and_stats(l2b_tif, gas_type=gas_type)
+                plume_stats["granule_id"] = granule_id
+                plume_stats["gas_type"] = gas_type
+                rows.append(plume_stats)
 
     plume_df = pd.DataFrame(rows)
     plume_df.sort_values(by="max_ppmm", ascending=False, inplace=True)
-    
+
     return plume_df
     
 
@@ -760,8 +876,26 @@ def collate_granule_metadata(granule_id, l1b_product, num_plumes, gas_type="ch4"
     return granule_metadata
 
 
-def collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id, gas_type="ch4"):
+def collate_plume_metadata(
+    l2b_jsons,
+    l2b_tifs,
+    granule_id,
+    gas_type="ch4",
+    l2b_enh=None,
+    l2b_uncert=None,
+    l2b_sens=None,
+):
+    """
+    Build per-plume metadata dicts. If l2b_enh, l2b_uncert, and l2b_sens are
+    provided (one DataArray each for the granule), also attach the four
+    difficulty metrics from compute_plume_metrics after aligning the plume
+    mask to the ENH grid.
+    """
     plume_metadata_list = []
+    have_enh_metrics = (
+        l2b_enh is not None and l2b_uncert is not None and l2b_sens is not None
+    )
+
     for l2b_json, l2b_tif in zip(l2b_jsons, l2b_tifs):
         _, plume_stats = get_plume_mask_and_stats(l2b_tif, gas_type=gas_type)
         plume_metadata = {
@@ -769,7 +903,23 @@ def collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id, gas_type="ch4"):
             "granule_id": granule_id,
             "gas_type": gas_type,
         }
-        plume_metadata_list.append(plume_metadata | plume_stats)
+
+        if have_enh_metrics:
+            plume_mask_binary, enh_arr, uncert_arr, sens_arr = align_plume_to_enh_grid(
+                l2b_tif, l2b_enh, l2b_uncert, l2b_sens
+            )
+            difficulty_metrics = compute_plume_metrics(
+                enh_arr, uncert_arr, sens_arr, plume_mask_binary
+            )
+            # JSON-serializable floats (handles np.nan and np.floating)
+            for k, v in difficulty_metrics.items():
+                difficulty_metrics[k] = float(v) if np.isscalar(v) else v
+            plume_metadata = plume_metadata | plume_stats | difficulty_metrics
+        else:
+            plume_metadata = plume_metadata | plume_stats
+
+        plume_metadata_list.append(plume_metadata)
+
     return plume_metadata_list
 
 
@@ -898,7 +1048,20 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     save_instrument_metadata(dataset_dir, l1b_prod)
     
     granule_metadata = collate_granule_metadata(granule_id, l1b_prod, len(l2b_jsons), gas_type=gas_type)
-    plume_metadata_list = collate_plume_metadata(l2b_jsons, l2b_tifs, granule_id, gas_type=gas_type)
+    if len(l2b_enhs) > 0 and len(l2b_uncerts) > 0 and len(l2b_sens) > 0:
+        plume_metadata_list = collate_plume_metadata(
+            l2b_jsons,
+            l2b_tifs,
+            granule_id,
+            gas_type=gas_type,
+            l2b_enh=l2b_enhs[0],
+            l2b_uncert=l2b_uncerts[0],
+            l2b_sens=l2b_sens[0],
+        )
+    else:
+        plume_metadata_list = collate_plume_metadata(
+            l2b_jsons, l2b_tifs, granule_id, gas_type=gas_type
+        )
     
     positive_chip_xy_list = []
     for i, plume_metadata in enumerate(plume_metadata_list):
@@ -966,11 +1129,17 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         json.dump(granule_metadata, f)
     
     # Build returns:
+    _DIFFICULTY_KEYS = (
+        "Radiometric_Clarity",
+        "Optical_Favourability",
+        "Geometric_Prominence",
+        "Contextual_Heterogeneity",
+    )
     index_rows = []
     for i, plume_metadata in enumerate(plume_metadata_list):
         plume_difficulty = plume_metadata["training_category"]
         dir_name = plume_metadata["plume_id"] + "_" + plume_difficulty
-        index_rows.append({
+        row = {
             "id": f"{granule_id}_{plume_metadata['plume_id']}",
             "event_id": os.path.join(os.path.basename(granule_dir), dir_name),
             "granule_id": granule_id,
@@ -979,11 +1148,14 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "num_plume_pixels": plume_metadata["num_plume_pixels"],
             "training_category": plume_difficulty,
             "gas_type": gas_type,
-        })
+        }
+        for k in _DIFFICULTY_KEYS:
+            row[k] = plume_metadata.get(k, np.nan)
+        index_rows.append(row)
 
     for i in range(len(hypercube_chip_list)):
         dir_name = "negative_chip_" + str(i)
-        index_rows.append({
+        row = {
             "id": f"{granule_id}_neg_{i}",
             "event_id": os.path.join(os.path.basename(granule_dir), dir_name),
             "granule_id": granule_id,
@@ -992,7 +1164,10 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "num_plume_pixels": 0,
             "training_category": None,
             "gas_type": gas_type,
-        })
+        }
+        for k in _DIFFICULTY_KEYS:
+            row[k] = np.nan
+        index_rows.append(row)
 
     return pd.DataFrame(index_rows)
 
