@@ -628,6 +628,10 @@ def align_plume_to_enh_grid(plume_tif, l2b_enh, l2b_uncert, l2b_sens):
     plume_vals[plume_vals == -9999] = np.nan
     plume_vals[np.isnan(plume_vals)] = 0
     plume_mask_binary = (plume_vals > 0).astype(np.int64)
+    
+    enh_arr[enh_arr == -9999] = np.nan
+    uncert_arr[uncert_arr == -9999] = np.nan
+    sens_arr[sens_arr == -9999] = np.nan
 
     enh_arr = np.asarray(l2b_enh.values, dtype=np.float64)
     uncert_arr = np.asarray(l2b_uncert.values, dtype=np.float64)
@@ -912,6 +916,7 @@ def collate_plume_metadata(
                 enh_arr, uncert_arr, sens_arr, plume_mask_binary
             )
             # JSON-serializable floats (handles np.nan and np.floating)
+            difficulty_metrics[k] = None if (np.isscalar(v) and np.isnan(v)) else float(v)
             for k, v in difficulty_metrics.items():
                 difficulty_metrics[k] = float(v) if np.isscalar(v) else v
             plume_metadata = plume_metadata | plume_stats | difficulty_metrics
