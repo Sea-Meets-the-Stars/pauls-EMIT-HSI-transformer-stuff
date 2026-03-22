@@ -314,7 +314,7 @@ def download_one_l1b_hypercube(granule_id, temp_dir="/more_data/temp_processing/
         mag1c_output, _ = mag1c_emit.mag1c_emit(rst, column_step=2, georreferenced=True)
         del rst
     
-    l1b_product = emit_xarray(rad_path, ortho=True)
+    l1b_product = emit_xarray(rad_path, ortho=True).load()
         
     #remove files in temp_dir:
     for path in downloaded_paths:
@@ -364,7 +364,9 @@ def download_one_l2b_set(granule_id, gas_type="ch4", temp_dir="/more_data/temp_p
             plume_metadata = geopandas.read_file(path)
             l2b_jsons.append(plume_metadata)
         elif os.path.basename(path).lower().endswith(".tif"):
-            plume_mask = rioxarray.open_rasterio(path).squeeze("band", drop=True) #has only one band, drops that dim
+            plume_mask = (
+                rioxarray.open_rasterio(path).squeeze("band", drop=True).load()
+            )  # load now: temp dir may be moved/removed before later .values access
             l2b_tifs.append(plume_mask)
             
     if nasa_archive_dir is not None:
@@ -388,11 +390,11 @@ def download_one_l2b_set(granule_id, gas_type="ch4", temp_dir="/more_data/temp_p
             uncert_tag = "CH4UNCERT" if gas_type.lower() == "ch4" else "CO2UNCERT"
             sens_tag = "CH4SENS" if gas_type.lower() == "ch4" else "CO2SENS"
             if enh_tag in basename:
-                l2b_enhs.append(rioxarray.open_rasterio(path).squeeze("band", drop=True))
+                l2b_enhs.append(rioxarray.open_rasterio(path).squeeze("band", drop=True).load())
             elif uncert_tag in basename:
-                l2b_uncerts.append(rioxarray.open_rasterio(path).squeeze("band", drop=True))
+                l2b_uncerts.append(rioxarray.open_rasterio(path).squeeze("band", drop=True).load())
             elif sens_tag in basename:
-                l2b_sens.append(rioxarray.open_rasterio(path).squeeze("band", drop=True))
+                l2b_sens.append(rioxarray.open_rasterio(path).squeeze("band", drop=True).load())
                 
         if nasa_archive_dir is not None:
             for path in downloaded_paths:
@@ -404,43 +406,78 @@ def download_one_l2b_set(granule_id, gas_type="ch4", temp_dir="/more_data/temp_p
     gc.collect()
     return l2b_jsons, l2b_tifs, l2b_enhs, l2b_uncerts, l2b_sens
 
-def compute_plume_metrics(enh_array, uncert_array, sens_array, plume_mask):
+def _crop_to_plume_vicinity(plume_mask, enh_array, uncert_array, sens_array, margin):
     """
-    Computes four dataset-generation difficulty metrics for an EMIT GHG plume.
+    Crop all arrays to the axis-aligned bounding box of plume pixels plus margin
+    (clipped to array edges). Used so background statistics reflect local clutter
+    near the plume, not the full ~75 km granule.
+    """
+    margin = int(margin)
+    pm = plume_mask > 0
+    if not np.any(pm):
+        return plume_mask, enh_array, uncert_array, sens_array
+    rows = np.where(np.any(pm, axis=1))[0]
+    cols = np.where(np.any(pm, axis=0))[0]
+    r0, r1 = int(rows[0]), int(rows[-1])
+    c0, c1 = int(cols[0]), int(cols[-1])
+    H, W = plume_mask.shape[0], plume_mask.shape[1]
+    r0 = max(0, r0 - margin)
+    r1 = min(H - 1, r1 + margin)
+    c0 = max(0, c0 - margin)
+    c1 = min(W - 1, c1 + margin)
+    sl = (slice(r0, r1 + 1), slice(c0, c1 + 1))
+    return (
+        plume_mask[sl],
+        enh_array[sl],
+        uncert_array[sl],
+        sens_array[sl],
+    )
 
-    Parameters
-    ----------
-    enh_array : np.ndarray
-        Enhancement array (e.g. EMIT_L2B_CH4ENH or CO2ENH) in ppm*m.
-    uncert_array : np.ndarray
-        Uncertainty array (e.g. EMIT_L2B_CH4UNCERT or CO2UNCERT) in ppm*m.
-    sens_array : np.ndarray
-        Sensitivity array (e.g. EMIT_L2B_CH4SENS or CO2SENS), unitless.
-    plume_mask : np.ndarray
-        Binary mask; 1 (or >0) = plume, 0 = background. Same shape as the other arrays.
 
-    Returns
-    -------
-    dict
-        Keys: Radiometric_Clarity, Optical_Favourability, Geometric_Prominence,
-        Contextual_Heterogeneity. Values are float or np.floating; NaN where not defined.
+def compute_plume_metrics(
+    enh_array,
+    uncert_array,
+    sens_array,
+    plume_mask,
+    local_crop_margin=128,
+):
+    """
+    ... docstring: explain local_crop_margin (int = bbox+margin, None = legacy full-scene background) ...
     """
     plume_mask = np.asarray(plume_mask)
     enh_array = np.asarray(enh_array, dtype=np.float64)
     uncert_array = np.asarray(uncert_array, dtype=np.float64)
     sens_array = np.asarray(sens_array, dtype=np.float64)
 
+    fill = -9999.0
+    enh_array = np.where(enh_array == fill, np.nan, enh_array)
+    uncert_array = np.where(uncert_array == fill, np.nan, uncert_array)
+    sens_array = np.where(sens_array == fill, np.nan, sens_array)
+
+    geometric_prominence = float(np.sum(plume_mask > 0))
+
+    if local_crop_margin is not None and geometric_prominence > 0:
+        plume_mask, enh_array, uncert_array, sens_array = _crop_to_plume_vicinity(
+            plume_mask, enh_array, uncert_array, sens_array, local_crop_margin
+        )
+
     plume_bool = (plume_mask > 0) & np.isfinite(plume_mask)
     background_bool = ~plume_bool
-
     n_plume = np.sum(plume_bool)
     n_background = np.sum(background_bool)
 
     out = {}
 
-    # 1. Radiometric Clarity: max(Signal/Uncertainty) over plume (safe division)
+    #1. Radiometric Clarity
     if n_plume == 0:
         out["Radiometric_Clarity"] = np.nan
+        print(f"No plume pixels found in the array.")
+        print(f"Plume Area (Pixels): {n_plume}")
+        print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
+        print(f"Valid UNCERT Pixels: {np.sum(np.isfinite(uncert_array[plume_bool]))}")
+        print(f"Valid SENS Pixels:   0")
+        print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
+        print(f"--------------------------------------------------\n")
     else:
         enh_plume = enh_array[plume_bool]
         uncert_plume = uncert_array[plume_bool]
@@ -450,25 +487,60 @@ def compute_plume_metrics(enh_array, uncert_array, sens_array, plume_mask):
             out["Radiometric_Clarity"] = np.nanmax(sur)
         else:
             out["Radiometric_Clarity"] = np.nan
+            print(f"No valid plume pixels found in the array.")
+            print(f"Plume Area (Pixels): {n_plume}")
+            print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
+            print(f"Valid UNCERT Pixels: {np.sum(np.isfinite(uncert_array[plume_bool]))}")
+            print(f"Valid SENS Pixels:   0")
+            print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
+            print(f"--------------------------------------------------\n")
 
-    # 2. Optical Favourability: mean sensitivity over plume
+    #2. Optical Favourability
     if n_plume == 0:
         out["Optical_Favourability"] = np.nan
     else:
         sens_plume = sens_array[plume_bool]
-        out["Optical_Favourability"] = np.nanmean(sens_plume)
+        valid_sens = np.isfinite(sens_plume)
+        
+        if not np.any(valid_sens):
+            out["Optical_Favourability"] = np.nan
+            
+            # Print diagnostic information for the user
+            print(f"\n--- All-NaN SENS Array Detected ---")
+            print(f"Plume Area (Pixels): {n_plume}")
+            print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
+            print(f"Valid UNCERT Pixels: {np.sum(np.isfinite(uncert_array[plume_bool]))}")
+            print(f"Valid SENS Pixels:   0")
+            print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
+            print(f"--------------------------------------------------\n")
+        else:
+            out["Optical_Favourability"] = np.nanmean(sens_plume)
 
-    # 3. Geometric Prominence: total plume area (pixels, 60 m x 60 m each)
-    out["Geometric_Prominence"] = float(np.sum(plume_mask > 0))
+    #3. Geometric Prominence
+    out["Geometric_Prominence"] = geometric_prominence
 
-    # 4. Contextual Heterogeneity: std(enhancement) over background
+    #4. Contextual Heterogeneity
     if n_background == 0:
         out["Contextual_Heterogeneity"] = np.nan
+        print(f"No background pixels found in the array.")
+        print(f"Plume Area (Pixels): {n_plume}")
+        print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
+        print(f"Valid UNCERT Pixels: {np.sum(np.isfinite(uncert_array[plume_bool]))}")
+        print(f"Valid SENS Pixels:   0")
+        print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
+        print(f"--------------------------------------------------\n")
     else:
         enh_bg = enh_array[background_bool]
         finite = np.isfinite(enh_bg)
         if np.sum(finite) < 2:
             out["Contextual_Heterogeneity"] = np.nan
+            print(f"No valid background pixels found in the array.")
+            print(f"Plume Area (Pixels): {n_plume}")
+            print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
+            print(f"Valid UNCERT Pixels: {np.sum(np.isfinite(uncert_array[plume_bool]))}")
+            print(f"Valid SENS Pixels:   0")
+            print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
+            print(f"--------------------------------------------------\n")
         else:
             out["Contextual_Heterogeneity"] = np.nanstd(enh_bg)
 
@@ -481,7 +553,7 @@ def get_plume_mask_and_stats(plume_tif, visualize_flag=False, gas_type="ch4"):
     mean_ppmm = np.nanmean(plume_mask[plume_mask > 0])
     sum_ppmm = np.nansum(plume_mask[plume_mask > 0])
     min_ppmm = np.nanmin(plume_mask)
-    brightest_99prc = np.nanpercentile(plume_mask, 99)
+    brightest_99prc = np.nanpercentile(plume_mask[plume_mask > 0], 99)
     num_plume_pixels = np.count_nonzero(plume_mask > 0)
      
     if visualize_flag:
