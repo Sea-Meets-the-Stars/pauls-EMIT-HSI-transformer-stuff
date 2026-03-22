@@ -442,7 +442,24 @@ def compute_plume_metrics(
     local_crop_margin=128,
 ):
     """
-    ... docstring: explain local_crop_margin (int = bbox+margin, None = legacy full-scene background) ...
+    Four interpretable difficulty metrics (aligned ENH / UNCERT / SENS / mask).
+
+    Parameters
+    ----------
+    enh_array, uncert_array, sens_array : array_like
+        L2B enhancement (ppm·m), uncertainty (ppm·m), sensitivity (unitless).
+    plume_mask : array_like
+        Plume mask: positive = plume. Same 2D shape as ENH.
+    local_crop_margin : int or None
+        If int, crop to plume bounding box plus margin before metrics (local
+        background for background_std_dev). plume_pixel_area uses the full
+        granule mask count before crop. If None, full-scene background (legacy).
+
+    Returns
+    -------
+    dict
+        max_signal_to_uncertainty, mean_plume_sensitivity, plume_pixel_area,
+        background_std_dev (float or NaN where undefined).
     """
     plume_mask = np.asarray(plume_mask)
     enh_array = np.asarray(enh_array, dtype=np.float64)
@@ -454,9 +471,9 @@ def compute_plume_metrics(
     uncert_array = np.where(uncert_array == fill, np.nan, uncert_array)
     sens_array = np.where(sens_array == fill, np.nan, sens_array)
 
-    geometric_prominence = float(np.sum(plume_mask > 0))
+    plume_pixel_area = float(np.sum(plume_mask > 0))
 
-    if local_crop_margin is not None and geometric_prominence > 0:
+    if local_crop_margin is not None and plume_pixel_area > 0:
         plume_mask, enh_array, uncert_array, sens_array = _crop_to_plume_vicinity(
             plume_mask, enh_array, uncert_array, sens_array, local_crop_margin
         )
@@ -468,9 +485,9 @@ def compute_plume_metrics(
 
     out = {}
 
-    #1. Radiometric Clarity
+    # 1. Max ENH/UNCERT on plume (signal-to-uncertainty)
     if n_plume == 0:
-        out["Radiometric_Clarity"] = np.nan
+        out["max_signal_to_uncertainty"] = np.nan
         print(f"No plume pixels found in the array.")
         print(f"Plume Area (Pixels): {n_plume}")
         print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
@@ -484,9 +501,9 @@ def compute_plume_metrics(
         valid = np.isfinite(enh_plume) & np.isfinite(uncert_plume) & (uncert_plume > 0)
         if np.any(valid):
             sur = np.where(valid, enh_plume / uncert_plume, np.nan)
-            out["Radiometric_Clarity"] = np.nanmax(sur)
+            out["max_signal_to_uncertainty"] = np.nanmax(sur)
         else:
-            out["Radiometric_Clarity"] = np.nan
+            out["max_signal_to_uncertainty"] = np.nan
             print(f"No valid plume pixels found in the array.")
             print(f"Plume Area (Pixels): {n_plume}")
             print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
@@ -495,15 +512,15 @@ def compute_plume_metrics(
             print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
             print(f"--------------------------------------------------\n")
 
-    #2. Optical Favourability
+    # 2. Mean SENS on plume
     if n_plume == 0:
-        out["Optical_Favourability"] = np.nan
+        out["mean_plume_sensitivity"] = np.nan
     else:
         sens_plume = sens_array[plume_bool]
         valid_sens = np.isfinite(sens_plume)
         
         if not np.any(valid_sens):
-            out["Optical_Favourability"] = np.nan
+            out["mean_plume_sensitivity"] = np.nan
             
             # Print diagnostic information for the user
             print(f"\n--- All-NaN SENS Array Detected ---")
@@ -514,14 +531,14 @@ def compute_plume_metrics(
             print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
             print(f"--------------------------------------------------\n")
         else:
-            out["Optical_Favourability"] = np.nanmean(sens_plume)
+            out["mean_plume_sensitivity"] = np.nanmean(sens_plume)
 
-    #3. Geometric Prominence
-    out["Geometric_Prominence"] = geometric_prominence
+    # 3. Plume pixel count (full granule, before local crop)
+    out["plume_pixel_area"] = plume_pixel_area
 
-    #4. Contextual Heterogeneity
+    # 4. Std dev of ENH on local background
     if n_background == 0:
-        out["Contextual_Heterogeneity"] = np.nan
+        out["background_std_dev"] = np.nan
         print(f"No background pixels found in the array.")
         print(f"Plume Area (Pixels): {n_plume}")
         print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
@@ -533,7 +550,7 @@ def compute_plume_metrics(
         enh_bg = enh_array[background_bool]
         finite = np.isfinite(enh_bg)
         if np.sum(finite) < 2:
-            out["Contextual_Heterogeneity"] = np.nan
+            out["background_std_dev"] = np.nan
             print(f"No valid background pixels found in the array.")
             print(f"Plume Area (Pixels): {n_plume}")
             print(f"Valid ENH Pixels:    {np.sum(np.isfinite(enh_array[plume_bool]))}")
@@ -542,7 +559,7 @@ def compute_plume_metrics(
             print(f"Cause: Plume mask falls entirely on -9999 nodata pixels.")
             print(f"--------------------------------------------------\n")
         else:
-            out["Contextual_Heterogeneity"] = np.nanstd(enh_bg)
+            out["background_std_dev"] = np.nanstd(enh_bg)
 
     return out
 
@@ -853,8 +870,8 @@ def survey_plume_stats(
     include_difficulty_metrics : bool
         If False (default), only downloads plume-mask TIFs (fast). Same as before.
         If True, also downloads ENH/UNCERT/SENS for each granule and adds the four
-        difficulty metrics (Radiometric_Clarity, Optical_Favourability,
-        Geometric_Prominence, Contextual_Heterogeneity) per plume row.
+        difficulty metrics (max_signal_to_uncertainty, mean_plume_sensitivity,
+        plume_pixel_area, background_std_dev) per plume row.
     temp_dir : str or None
         When include_difficulty_metrics is True, directory used for Earthdata
         downloads. If None, a temporary directory is created per granule and removed
@@ -1206,10 +1223,10 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     
     # Build returns:
     _DIFFICULTY_KEYS = (
-        "Radiometric_Clarity",
-        "Optical_Favourability",
-        "Geometric_Prominence",
-        "Contextual_Heterogeneity",
+        "max_signal_to_uncertainty",
+        "mean_plume_sensitivity",
+        "plume_pixel_area",
+        "background_std_dev",
     )
     index_rows = []
     for i, plume_metadata in enumerate(plume_metadata_list):
