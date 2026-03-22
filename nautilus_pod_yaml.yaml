@@ -1,0 +1,187 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: psk-hyperspectral-coolstuff-code-pod-1
+  labels:
+    app: jupyterlab
+# find node names here: https://nrp.ai/viz/resources/
+spec:
+  affinity:
+    nodeAffinity:
+      # Preference: Try to schedule in UCSC zone first
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: topology.kubernetes.io/zone
+            operator: In
+            values:
+            - ucsc
+      
+      # Preference 2: Specific Node (Lower priority)
+      - weight: 80
+        preference:
+          matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+            - hcc-nrp-pki-c1703.unl.edu
+            - hcc-nrp-pki-c1705.unl.edu
+
+
+      # Priority 2: massive VRAM (>40GB) (Weight 80 - Medium)
+      # Targeting 48GB and 80GB cards specifically
+      - weight: 70
+        preference:
+          matchExpressions:
+          - key: nvidia.com/gpu.product
+            operator: In
+            values:
+            - NVIDIA-A100-SXM4-80GB
+            - NVIDIA-A100-80GB-PCIe
+            - NVIDIA-RTX-A6000            # 48GB
+            - NVIDIA-RTX-6000-Ada-Generation # 48GB
+            - NVIDIA-A40                  # 48GB
+            - NVIDIA-L40                  # 48GB
+
+      # Preference 2: Specific Node (Lower priority)
+      - weight: 50
+        preference:
+          matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+            - hcc-nrp-shor-c6009.unl.edu
+            - hcc-nrp-shor-c5813.unl.edu
+            - hcc-nrp-shor-c5921.unl.edu
+            - nautilus-it-gpu02.fullerton.edu
+            - uicnrp-fiona2.evl.uic.edu
+
+
+      # Requirement: Strictly DO NOT schedule on these nodes
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          # 1. Block specific broken nodes
+          - key: linbit.com/hostname
+            operator: NotIn
+            values:
+            - k8s-gpu-01.calit2.optiputer.net
+          - key: kubernetes.io/hostname
+            operator: NotIn
+            values:
+            - prp-gpu-2.t2.ucsd.edu
+            - k8s-haosu-02.sdsc.optiputer.net
+            - k8s-haosu-21.sdsc.optiputer.net
+            - k8s-haosu-24.sdsc.optiputer.net
+            - k8s-gpu-3.ucr.edu
+            - gpu-04.nrp.mghpcc.org
+            - knuron.calit2.optiputer.net
+
+          # 2. BLACKLIST: Exclude low-VRAM GPU models
+          - key: nvidia.com/gpu.product
+            operator: NotIn
+            values:
+            # The 11GB Cards (likely culprits)
+            - NVIDIA-GeForce-GTX-1080-Ti
+            - NVIDIA-GeForce-RTX-2080-Ti
+            # The 12GB Cards
+            - NVIDIA-TITAN-Xp
+            - NVIDIA-TITAN-V
+            # The 8GB/10GB Cards
+            - NVIDIA-GeForce-GTX-1080
+            - NVIDIA-GeForce-GTX-1070
+            - Quadro-M4000
+  containers:
+    - name: gpu-container
+      image: ghcr.io/pskillam8/hyperspectral_coolstuff:v1
+
+      # --- ADDED STARTUP SCRIPT ---
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          # Ensure workspace exists and navigate to it
+          mkdir -p /workspace
+          cd /workspace
+          
+          # Install required packages
+          pip3 install scikit-image
+          
+          # Clone repository using injected GitHub environment variables
+          git clone https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/pskillam8/Hyperspectral_Coolstuff.git
+          
+          # Keep the pod alive for interactive use
+          sleep infinity
+      # ----------------------------
+
+      env:
+        - name: GITHUB_USER
+          valueFrom:
+            secretKeyRef:
+              name: github-secret
+              key: GITHUB_USER
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github-secret
+              key: GITHUB_TOKEN
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: nautilus-s3-creds
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: nautilus-s3-creds
+              key: AWS_SECRET_ACCESS_KEY
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: huggingface-secret
+              key: HF_TOKEN
+        # Set the Nautilus endpoint so you don't forget it
+        - name: AWS_ENDPOINT_URL
+          value: "https://s3-west.nrp-nautilus.io"
+      # ports:
+      #   - containerPort: 8888
+      #   - containerPort: 6006
+      volumeMounts:
+        - mountPath: /workspace/emit_project
+          name: s3-scratch-space
+        - mountPath: /dataset
+          name: psk-deepfakeart-dataset-vol2
+        - mountPath: /more_data
+          name: hyperspectral-data-pvc2
+        - mountPath: /dev/shm
+          name: dshm
+        # - mountPath: "/ramdisk"
+        #   name: "ram-disk"
+      resources:
+        requests:
+          memory: "32G"   # Minimum memory guaranteed to the pod
+          cpu: "4"        # Minimum CPU guaranteed
+          nvidia.com/gpu: "1"
+          ephemeral-storage: 450Gi
+        limits:
+          nvidia.com/gpu: "1"
+          memory: "32G"
+          cpu: "16"
+          ephemeral-storage: 450Gi
+  restartPolicy: Never
+  volumes:
+    - name: s3-scratch-space
+      emptyDir: {}
+    - name: psk-deepfakeart-dataset-vol2
+      persistentVolumeClaim:
+        claimName: psk-deepfakeart-dataset-vol2
+    - name: hyperspectral-data-pvc2
+      persistentVolumeClaim:
+        claimName: hyperspectral-data-pvc2
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: "8Gi"
+    # - name: ram-disk
+    #   emptyDir:
+    #     medium: "Memory"
