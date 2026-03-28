@@ -610,6 +610,7 @@ def get_plume_mask_and_stats(plume_tif, visualize_flag=False, gas_type="ch4"):
     mean_ppmm = np.nanmean(plume_mask[plume_mask > 0])
     sum_ppmm = np.nansum(plume_mask[plume_mask > 0])
     min_ppmm = np.nanmin(plume_mask)
+    
     brightest_99prc = np.nanpercentile(plume_mask[plume_mask > 0], 99)
     num_plume_pixels = np.count_nonzero(plume_mask > 0)
      
@@ -974,7 +975,7 @@ def collate_plume_metadata(
             training_cat = assign_training_category(difficulty_metrics, gas_type)
             difficulty_metrics["training_category"] = training_cat
             
-            # Convert values safely for JSON serialization6+
+            # Convert values safely for JSON serialization
             for k, v in difficulty_metrics.items():
                 difficulty_metrics[k] = None if (np.isscalar(v) and pd.isna(v)) else (float(v) if not isinstance(v, (str, bool)) else v)
                 
@@ -1130,6 +1131,10 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     
     positive_chip_xy_list = []
     for i, plume_metadata in enumerate(plume_metadata_list):
+        if plume_metadata.get("training_category") == "corrupted":
+            print(f"Skipping chipping for plume {plume_metadata['plume_id']} due to corrupted EMIT arrays.")
+            continue
+        
         plume_mask_reprojected = project_plume_mask(l2b_tifs[i], l1b_prod)
         hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y) = chip_plume(
             l1b_prod, plume_mask_reprojected, l2b_enhs[0], mag1c_layer=mag1c_output, chip_size=chip_size)
