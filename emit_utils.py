@@ -29,19 +29,20 @@ from emit_tools import emit_xarray
 KNOWN_BAD_GRANULE_IDS = ["20240812T213914"]
 
 #Quantile thresholds:
-PLUME_THRESHOLDS = {
+DIFFICULTY_QUARTILES = {
     "ch4": {
-        "density": [275, 400, 540],
-        "peak_intensity": [975, 1400, 1850],
-        "size": [225, 550, 2600],
+        "max_signal_to_uncertainty": [5.35, 6.64, 10.62],
+        "mean_plume_sensitivity": [0.95, 0.99, 1.04],
+        "plume_pixel_area": [288.5, 620, 2280],
+        "background_std_dev": [157.0, 215.7, 343.2],
     },
     "co2": {
-        "density": [None, None, None],
-        "peak_intensity": [None, None, None],
-        "size": [225, 550, 2600],
-    },
+        "max_signal_to_uncertainty": [5.48, 6.78, 8.46],
+        "mean_plume_sensitivity": [0.88, 1.04, 1.13],
+        "plume_pixel_area": [546.75, 1366.5, 3501.75],
+        "background_std_dev": [9363.35, 11912.3, 14599],
+    }
 }
-#TODO: Calculate co2 thresholds using survey_plume_stats()
 
 def get_plume_granule_ids(gas_type="CH4", date_range=('2022-08-01', '2026-12-31'), max_count=100, cloud_cover_range=(0, 5)):
     """
@@ -433,6 +434,43 @@ def _crop_to_plume_vicinity(plume_mask, enh_array, uncert_array, sens_array, mar
         sens_array[sl],
     )
 
+def assign_training_category(metrics, gas_type="ch4"):
+    """
+    Translates the four continuous difficulty metrics into a 0-12 Composite Score,
+    then maps that score to a categorical training curriculum using predefined quartiles.
+    """
+    # 1. Handle missing data (plumes masked out by the EMIT pipeline)
+    if pd.isna(metrics.get("max_signal_to_uncertainty")) or pd.isna(metrics.get("mean_plume_sensitivity")):
+        return "corrupted"
+
+    q = DIFFICULTY_QUARTILES[gas_type.lower()]
+    score = 0
+
+    # 2. Standard Scoring (Higher is easier/better)
+    for key in ["max_signal_to_uncertainty", "mean_plume_sensitivity", "plume_pixel_area"]:
+        val = metrics.get(key)
+        if val >= q[key][1]: score += 3       # 4th Quartile
+        elif val >= q[key][2]: score += 2     # 3rd Quartile
+        elif val >= q[key]: score += 1     # 2nd Quartile
+        # Values below q25 (1st Quartile) get 0 points
+
+    # 3. Inverted Scoring (Higher clutter is harder/worse)
+    bg_val = metrics.get("background_std_dev")
+    if not pd.isna(bg_val):
+        if bg_val <= q["background_std_dev"]: score += 3      # 1st Quartile (Cleanest)
+        elif bg_val <= q["background_std_dev"][2]: score += 2    # 2nd Quartile
+        elif bg_val <= q["background_std_dev"][1]: score += 1    # 3rd Quartile
+        # Values above q75 (4th Quartile - Messiest) get 0 points
+
+    # 4. Map the 0-12 score to the training category
+    if score <= 3:
+        return "very_hard"
+    elif score <= 6:
+        return "hard"
+    elif score <= 9:
+        return "medium"
+    else:
+        return "easy"
 
 def compute_plume_metrics(
     enh_array,
@@ -566,6 +604,8 @@ def compute_plume_metrics(
 def get_plume_mask_and_stats(plume_tif, visualize_flag=False, gas_type="ch4"):
     plume_mask = plume_tif.values.copy()
     plume_mask[plume_mask == -9999] = np.nan
+    
+    #calculate basic stats:
     max_ppmm = np.nanmax(plume_mask)
     mean_ppmm = np.nanmean(plume_mask[plume_mask > 0])
     sum_ppmm = np.nansum(plume_mask[plume_mask > 0])
@@ -583,86 +623,12 @@ def get_plume_mask_and_stats(plume_tif, visualize_flag=False, gas_type="ch4"):
         plt.imshow(plume_mask)
         plt.show()
         
-    thresholds = PLUME_THRESHOLDS.get(gas_type.lower())
-    #Handle case where thresholds are not set:
-    if thresholds is None or any(t is None for t in thresholds["density"]):
-        plume_stats_dict = {
-            "max_ppmm": max_ppmm.item(),
-            "mean_ppmm": mean_ppmm.item(),
-            "sum_ppmm": sum_ppmm.item(),
-            "num_plume_pixels": num_plume_pixels,
-            "peak_intensity": brightest_99prc.item(),
-            "density_category": "uncategorized",
-            "peak_intensity_category": "uncategorized",
-            "size_category": "uncategorized",
-            "training_category": "uncategorized",
-        }
-        return plume_mask, plume_stats_dict
-    
-    d = thresholds["density"]
-    p = thresholds["peak_intensity"]
-    s = thresholds["size"]
-    
-    ## Assign Density Category:
-    if max_ppmm < d[0]:
-        density_category = "very faint"
-    elif max_ppmm < d[1]:
-        density_category = "faint"
-    elif max_ppmm < d[2]:
-        density_category = "medium"
-    else:
-        density_category = "strong"
-        
-    if brightest_99prc < p[0]:
-        peak_intensity_category = "very dim"
-    elif brightest_99prc < p[1]:
-        peak_intensity_category = "dim"
-    elif brightest_99prc < p[2]:
-        peak_intensity_category = "medium"
-    else:
-        peak_intensity_category = "bright"
-        
-    if num_plume_pixels < s[0]:
-        size_category = "small"
-    elif num_plume_pixels < s[1]:
-        size_category = "medium"
-    elif num_plume_pixels < s[2]:
-        size_category = "large"
-    else:
-        size_category = "huge"
-        
-    ## Assign Training Category:
-    if (density_category == "strong" or density_category == "medium") and \
-        (peak_intensity_category == "bright" or peak_intensity_category == "medium") and \
-        (size_category == "medium" or size_category == "large"):
-        training_category = "easy"
-        
-    elif (density_category == "strong" or density_category == "medium" or density_category == "faint") and \
-        (peak_intensity_category == "bright" or peak_intensity_category == "medium" or peak_intensity_category == "dim") and \
-        (size_category == "medium" or size_category == "large"):
-        training_category = "medium"
-    
-    elif (density_category == "very faint" or density_category == "faint") and \
-        (peak_intensity_category == "very dim" or peak_intensity_category == "dim") and \
-        (size_category == "small" or size_category == "medium"):
-        training_category = "very_hard"
-        
-    elif (size_category == "huge"):
-        training_category = "huge_plume"
-    
-    else:
-        training_category = "hard"
-        
     plume_stats_dict = {
         "max_ppmm": max_ppmm.item(),
         "mean_ppmm": mean_ppmm.item(),
         "sum_ppmm": sum_ppmm.item(),
         "num_plume_pixels": num_plume_pixels,
-        "peak_intensity": brightest_99prc.item(),
-        "density_category": density_category,
-        "peak_intensity_category": peak_intensity_category,
-        "size_category": size_category,
-        "training_category": training_category
+        "peak_intensity": brightest_99prc.item()
     }
     
     return plume_mask, plume_stats_dict
@@ -1004,11 +970,17 @@ def collate_plume_metadata(
             difficulty_metrics = compute_plume_metrics(
                 enh_arr, uncert_arr, sens_arr, plume_mask_binary
             )
-            # JSON-serializable floats (handles np.nan and np.floating)
+            
+            training_cat = assign_training_category(difficulty_metrics, gas_type)
+            difficulty_metrics["training_category"] = training_cat
+            
+            # Convert values safely for JSON serialization6+
             for k, v in difficulty_metrics.items():
-                difficulty_metrics[k] = None if (np.isscalar(v) and np.isnan(v)) else float(v)
+                difficulty_metrics[k] = None if (np.isscalar(v) and pd.isna(v)) else (float(v) if not isinstance(v, (str, bool)) else v)
+                
             plume_metadata = plume_metadata | plume_stats | difficulty_metrics
         else:
+            plume_metadata["training_category"] = "uncategorized"
             plume_metadata = plume_metadata | plume_stats
 
         plume_metadata_list.append(plume_metadata)
