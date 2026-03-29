@@ -29,7 +29,7 @@ from emit_tools import emit_xarray
 
 KNOWN_BAD_GRANULE_IDS = ["20240812T213914"]
 
-#Quantile thresholds:
+#Quantile thresholds, these are the Q25, Q50, Q75 thresholds for each of the four tracked metrics.  Generated against 100 random plumes in scratch.ipynb:
 DIFFICULTY_QUARTILES = {
     "ch4": {
         "max_signal_to_uncertainty": [5.35, 6.64, 10.62],
@@ -464,6 +464,8 @@ def assign_training_category(metrics, gas_type="ch4"):
         # Values above q75 (4th Quartile - Messiest) get 0 points
 
     # 4. Map the 0-12 score to the training category
+    assert score >= 0 and score <= 12, "Score must be between 0 and 12"
+    
     if score <= 3:
         return "very_hard"
     elif score <= 6:
@@ -1026,7 +1028,7 @@ def save_hypercube(chip, path_without_ext, fmt="npy", dtype=np.float32):
         raise ValueError(f"Unknown format '{fmt}'. Supported: 'npy', 'hdf5'")
 
 
-def load_hypercube(path, fmt=None):  #TODO: Handle file handle handling for h5 - leaks
+def load_hypercube(path, fmt=None):  
     """
     Load a hypercube chip from disk. Format is inferred from extension if not given.
     
@@ -1132,8 +1134,8 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     positive_chip_xy_list = []
     for i, plume_metadata in enumerate(plume_metadata_list):
         if plume_metadata.get("training_category") == "corrupted":
-            print(f"Skipping chipping for plume {plume_metadata['plume_id']} due to corrupted EMIT arrays.")
-            continue
+            print(f"Skipping chipping for granule {granule_id} plume {plume_metadata['plume_id']} due to corrupted EMIT arrays.")
+            return None
         
         plume_mask_reprojected = project_plume_mask(l2b_tifs[i], l1b_prod)
         hypercube_chip, mag1c_chip, plume_mask_chip, l2b_enh_chip, (chip_plume_center_x, chip_plume_center_y), (chip_start_x, chip_start_y) = chip_plume(
