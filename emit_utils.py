@@ -9,6 +9,7 @@ import requests
 from PIL import Image
 from io import BytesIO
 import tempfile
+import h5py
 
 import earthaccess
 from georeader.readers import emit
@@ -449,17 +450,17 @@ def assign_training_category(metrics, gas_type="ch4"):
     # 2. Standard Scoring (Higher is easier/better)
     for key in ["max_signal_to_uncertainty", "mean_plume_sensitivity", "plume_pixel_area"]:
         val = metrics.get(key)
-        if val >= q[key][1]: score += 3       # 4th Quartile
-        elif val >= q[key][2]: score += 2     # 3rd Quartile
-        elif val >= q[key]: score += 1     # 2nd Quartile
+        if val >= q[key][2]: score += 3       # >= q75 (4th Quartile)
+        elif val >= q[key][1]: score += 2     # >= q50 (3rd Quartile)
+        elif val >= q[key][0]: score += 1     # >= q25 (2nd Quartile)
         # Values below q25 (1st Quartile) get 0 points
 
     # 3. Inverted Scoring (Higher clutter is harder/worse)
     bg_val = metrics.get("background_std_dev")
     if not pd.isna(bg_val):
-        if bg_val <= q["background_std_dev"]: score += 3      # 1st Quartile (Cleanest)
-        elif bg_val <= q["background_std_dev"][2]: score += 2    # 2nd Quartile
-        elif bg_val <= q["background_std_dev"][1]: score += 1    # 3rd Quartile
+        if bg_val <= q["background_std_dev"][0]: score += 3      # <= q25 (1st Quartile - Cleanest)
+        elif bg_val <= q["background_std_dev"][1]: score += 2    # <= q50 (2nd Quartile)
+        elif bg_val <= q["background_std_dev"][2]: score += 1    # <= q75 (3rd Quartile)
         # Values above q75 (4th Quartile - Messiest) get 0 points
 
     # 4. Map the 0-12 score to the training category
@@ -1048,9 +1049,8 @@ def load_hypercube(path, fmt=None):  #TODO: Handle file handle handling for h5 -
         return np.load(path, mmap_mode="r")
 
     elif fmt == "hdf5":
-        import h5py
-        f = h5py.File(path, "r", swmr=True)
-        return f["hypercube"]
+        with h5py.File(path, "r") as f:
+            return f["hypercube"][:]  # Load into memory before closing
 
     else:
         raise ValueError(f"Unknown format '{fmt}'. Supported: 'npy', 'hdf5'")
