@@ -1080,10 +1080,10 @@ def save_instrument_metadata(dataset_dir, l1b_product):
 
 
 def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, overwrite = False, 
-                                cube_format="npy", chip_size=256, gas_type="ch4"):
+                                cube_format="npy", chip_size=256, gas_type="ch4", run_mag1c=True):
     granule_dir = os.path.join(dataset_dir, f"{granule_id}_{gas_type}")
     granule_dir_if_mp = os.path.join(dataset_dir, f"{granule_id}_{gas_type}_multiple_plumes")
-    run_mag1c = (gas_type == "ch4")
+    run_mag1c = run_mag1c and (gas_type == "ch4")
 
     if overwrite == False and os.path.exists(granule_dir):
         print(f"Granule {granule_id} already exists in {dataset_dir}, skipping...")
