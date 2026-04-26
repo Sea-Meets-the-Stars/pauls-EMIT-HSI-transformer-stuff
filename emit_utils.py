@@ -457,7 +457,10 @@ def assign_training_category(metrics, gas_type="ch4"):
 
     # 3. Inverted Scoring (Higher clutter is harder/worse)
     bg_val = metrics.get("background_std_dev")
-    if not pd.isna(bg_val):
+    if pd.isna(bg_val):
+        score += 1
+        print(f"Background std dev is NaN, adding 1 point to score")
+    else:
         if bg_val <= q["background_std_dev"][0]: score += 3      # <= q25 (1st Quartile - Cleanest)
         elif bg_val <= q["background_std_dev"][1]: score += 2    # <= q50 (2nd Quartile)
         elif bg_val <= q["background_std_dev"][2]: score += 1    # <= q75 (3rd Quartile)
