@@ -75,6 +75,7 @@ def run_full_dataset_build(
     gas_type: str = "ch4",
     cube_format: str = "npy",
     overwrite: bool = False,
+    run_mag1c: bool = True,
 ):
     """
     Download, chip, and save a complete labelled dataset for the supplied
@@ -88,6 +89,7 @@ def run_full_dataset_build(
         cube_format=cube_format,
         overwrite=overwrite,
         gas_type=gas_type,
+        run_mag1c=run_mag1c,
     )
     return dataset_index_df
 
@@ -97,6 +99,7 @@ def run_single_granule_test(
     output_dir: str,
     gas_type: str = "ch4",
     cube_format: str = "npy",
+    run_mag1c: bool = True,
 ):
     """
     Process exactly one granule end-to-end.  Useful for testing the pipeline
@@ -112,6 +115,7 @@ def run_single_granule_test(
         gas_type=gas_type,
         cube_format=cube_format,
         overwrite=True,
+        run_mag1c=run_mag1c,
     )
     return single_granule_index_df
 
@@ -254,7 +258,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "Useful for validating the environment before a large batch run."
         ),
     )
-
+    parser.add_argument(
+        "--no_mag1c",
+        action="store_true",
+        default=False,
+        help="Skip MAG1C for CH4 granules (faster; CH4 mag1c.npy chips not written).",
+    )
     return parser
 
 
@@ -268,6 +277,7 @@ def _run_from_cli(cli_args: argparse.Namespace):
             output_dir=cli_args.output_dir,
             gas_type=cli_args.gas_type,
             cube_format=cli_args.cube_format,
+            run_mag1c=not cli_args.no_mag1c,
         )
         if single_granule_index_df is not None:
             print("\nSingle-granule index:")
@@ -307,6 +317,7 @@ def _run_from_cli(cli_args: argparse.Namespace):
         gas_type=cli_args.gas_type,
         cube_format=cli_args.cube_format,
         overwrite=cli_args.overwrite,
+        run_mag1c=not cli_args.no_mag1c,
     )
 
     print(f"\nDone. Dataset index shape: {dataset_index_df.shape}")

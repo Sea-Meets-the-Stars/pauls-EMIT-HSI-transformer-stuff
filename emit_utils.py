@@ -1247,7 +1247,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
     return pd.DataFrame(index_rows)
 
 
-def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, gas_type="ch4"):
+def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, gas_type="ch4", run_mag1c=True):
     """
     Build a complete dataset from a list of granule IDs.
 
@@ -1260,6 +1260,7 @@ def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, 
         cube_format:                "npy" or "hdf5"
         overwrite:                  if False, skip granules whose directories already exist
         gas_type:                   "ch4" or "co2"
+        run_mag1c:                  if True, run MAG1C on the L1B hypercube
     
     Returns:
         The full dataset index as a pandas DataFrame.
@@ -1271,7 +1272,7 @@ def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, 
         print(f"\n[{i+1}/{len(granule_ids)}] Processing {gas_type.upper()} granule {granule_id}...")
         try:
             result = save_one_granule_to_dataset(
-                granule_id, dataset_dir, overwrite=overwrite, cube_format=cube_format, gas_type=gas_type
+                granule_id, dataset_dir, overwrite=overwrite, cube_format=cube_format, gas_type=gas_type, run_mag1c=run_mag1c
             )
             if result is not None and isinstance(result, pd.DataFrame):
                 all_index_dfs.append(result)
