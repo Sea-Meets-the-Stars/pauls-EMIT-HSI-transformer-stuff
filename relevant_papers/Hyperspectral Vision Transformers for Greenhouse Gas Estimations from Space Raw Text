@@ -1,0 +1,876 @@
+Hyperspectral Vision Transformers for Greenhouse Gas Estimations from Space
+Ruben Gonzalez Avil´es1,2 Linus Scheibenreif1 Nassim Ait Ali Braham3 Benedikt Blumenstiel2
+Thomas Brunschwiler2 Ranjini Guruprasad2 Damian Borth1 Conrad Albrecht3
+Paolo Fraccaro2 Devyani Lambhate2 Johannes Jakubik2
+1University of St. Gallen 2IBM Research 3German Aerospace Center (DLR)
+Abstract
+Hyperspectral imaging provides detailed spectral information
+and holds significant potential for monitoring of
+greenhouse gases (GHGs). However, its application is constrained
+by limited spatial coverage and infrequent revisit
+times. In contrast, multispectral imaging offers broader
+spatial and temporal coverage but often lacks the spectral
+detail that can enhance GHG detection. To address
+these challenges, this study proposes a spectral transformer
+model that synthesizes hyperspectral data from multispectral
+inputs. The model is pre-trained via a bandwise
+masked autoencoder and subsequently fine-tuned on
+spatio-temporally aligned multispectral–hyperspectral image
+pairs. The resulting synthetic hyperspectral data retain
+the spatial and temporal benefits of multispectral imagery
+and improve GHG prediction accuracy relative to
+using multispectral data alone. This approach effectively
+bridges the trade-off between spectral resolution and coverage,
+highlighting its potential to advance atmospheric
+monitoring by combining the strengths of hyperspectral and
+multispectral systems with self-supervised deep learning.
+1. Introduction
+Satellite-based remote sensing is vital to a wide range
+of Earth observation applications, from land-use mapping
+and agricultural assessments to climate and atmospheric
+studies [18]. By measuring reflected or emitted radiation
+across multiple wavelengths, remote sensing provides
+large-scale datasets for analyzing environmental changes,
+land cover characteristics, and other geophysical phenomena
+[21]. Among satellite imaging systems, hyperspectral
+sensors (e.g., EnMAP) capture hundreds of narrow, contiguous
+bands, enabling fine-grained spectral analysis [7, 8].
+However, these systems often have narrower swath widths
+and longer revisit intervals [30], limiting their spatial and
+temporal coverage.
+Multispectral sensors (e.g., Sentinel-2, Landsat) instead
+collect fewer, broader bands but provide wider coverage
+and more frequent revisits [5, 22]. This makes multispectral
+imagery well suited for large-scale, time-sensitive applications,
+but its coarser spectral resolution may overlook
+subtle absorption features, such as those associated with
+trace-gases like carbon dioxide (CO2), methane (CH4), or
+nitrogen dioxide (NO2). A technique that fuses the richer
+spectral detail of hyperspectral imagery with the extensive
+coverage of multispectral sensors could yield more comprehensive
+remote sensing capabilities [30].
+2. Background
+2.1. Multispectral and Hyperspectral Imaging
+Remote sensing acquires information about the Earth’s surface
+and atmosphere by measuring electromagnetic radiation
+reflected or emitted by various materials [2]. While
+both multispectral and hyperspectral imaging exploit this
+principle, they differ in spectral resolution and coverage.
+Multispectral systems observe a few broad bands (e.g.,
+Sentinel-2 has 13), providing rapid, wide-scale coverage
+suitable for tasks like land cover classification and vegetation
+monitoring [5, 16]. Their broader bands, however,
+may miss subtle absorption features that can be important
+for detailed material or gas analyses [14].
+Figure 1. 3D visualization of corresponding Sentinel-2 (left) and
+EnMAP (right) data cubes, each spanning the same spatial dimensions
+along the horizontal axes and the spectral dimension along
+the vertical axis.
+arXiv:2504.16851v1 [cs.CV] 23 Apr 2025
+Hyperspectral systems (e.g., EnMAP) capture hundreds
+of narrow, contiguous bands that can distinguish fine spectral
+differences among materials [8, 25]. This facilitates
+tasks such as precise mineral exploration, specieslevel
+vegetation mapping, and gas detection, where subtle
+wavelength-specific absorption or reflectance patterns can
+be particularly relevant [9, 20]. Yet hyperspectral instruments
+often have reduced spatial swath widths and less frequent
+revisit times, creating a trade-off between spectral
+resolution and the ability to observe large areas or rapidly
+evolving conditions [15, 30].
+2.2. Spectral Signatures and Gas Detection
+An important aspect of remote sensing is that each material
+or gas exhibits a characteristic reflectance or absorption
+pattern across specific wavelengths, known as its spectral
+signature [1]. Greenhouse gases (GHGs) such as CO2
+have narrow absorption peaks in the near-infrared (NIR) and
+shortwave infrared (SWIR) regions [13, 28]. Figure 2 illustrates
+these absorption features for several GHGs, along
+with the wavelength coverage of Sentinel-2 and EnMAP.
+Because multispectral sensors capture fewer, broader bands,
+they may only partially record these absorption patterns, potentially
+reducing gas retrieval accuracy. In contrast, hyperspectral
+sensors typically provide more detailed coverage of
+these wavelengths, which can facilitate improved detection
+and quantification of atmospheric gases [24].
+By reconstructing hyperspectral-like information from
+more frequently available multispectral data, one can potentially
+identify these absorption features more accurately
+on a broader temporal and spatial scale. This can extend
+the utility of multispectral imagery for atmospheric studies,
+including GHG monitoring, where the finer spectral resolution
+traditionally found only in hyperspectral data may significantly
+enhance detection accuracy [3, 32].
+3. Datasets
+This study employs several satellite-based datasets to develop
+and evaluate a hyperspectral reconstruction model
+and its downstream application in GHG prediction. Specifically,
+two large EnMAP hyperspectral collections are used
+for training and validation, along with both real and synthetic
+multispectral Sentinel-2 data. Additional GHG measurements
+from Sentinel-5P [11] and the Orbiting Carbon
+Observatory 3 (OCO-3) [26] are incorporated to assess the
+impact of spectral detail on gas concentration estimates.
+3.1. Hyperspectral EnMAP Data
+Two EnMAP-derived datasets were used: HySpecNet-11k
+[12] and SpectralEarth [6]. Both provide Level-2A (surface
+reflectance) images at 30m resolution, spanning 202 usable
+bands from 420 to 2450 nm. A cloud-filtering step was applied
+at the scene level, which may still leave individual
+patches with residual cloud cover exceeding 10% [12].
+• HySpecNet-11k: Comprises 11,483 hyperspectral images,
+each sized at 128×128 pixels, sampled from 250
+distinct EnMAP tiles captured between November 2 and
+November 9, 2022 [12].
+• SpectralEarth: Contains over 538,000 128×128-pixel
+hyperspectral images, derived from more than 11,600 En-
+MAP tiles spanning April 2022 to April 2024 [6].
+3.2. Multispectral Sentinel-2 Data
+To provide multispectral inputs matched to the HySpecNet-
+11k dataset, we acquired Sentinel-2 Level-2A (surface reflectance)
+scenes from Google Earth Engine [10]. For each
+HySpecNet-11k patch, we identified all Sentinel-2 scenes
+Figure 2. Absorption spectra and satellite band coverage. The upper section illustrates the wavelength coverage of each spectral band, with
+widths corresponding to the Full-Width Half-Maximum (FWHM) values extracted from the metadata of the corresponding satellite product
+[5, 8]. The lower section shows the smoothed absorption spectra for three gases, with absorption data sourced from the High Resolution
+Transmission (HITRAN) database and smoothed using a Gaussian filter to reduce noise for visualization [13].
+within a ±3-day window, then filtered them to ≤ 10% cloud
+cover over the region of interest. From this filtered set,
+the scene captured closest in time to the EnMAP acquisition
+date was selected. This process yielded 9,797 valid
+EnMAP–Sentinel-2 pairs, covering approximately 85.32%
+of the HySpecNet-11k dataset.
+Synthetic Sentinel-2 Data Because the EnMAP and
+Sentinel-2 scenes are acquired at slightly different times,
+they can exhibit varying cloud occlusion patterns, which in
+turn lead to spatial inconsistencies, especially when residual
+clouds are present in one image but not in the other. To
+facilitate controlled comparisons of spectral resolution impacts,
+a Synthetic Sentinel-2 dataset was derived by degrading
+EnMAP hyperspectral data using Sentinel-2A’s spectral
+response function (SRF). This ensures that the only distinction
+between the Synthetic Sentinel-2 and EnMAP data is
+the spectral granularity and coverage, eliminating potential
+confounding factors such as sensor characteristics, processing
+pipelines, cloud occlusion or temporal mismatches
+[19, 31].
+The Synthetic Sentinel-2 data was constructed by mapping
+EnMAP’s spectral bands (BEnMAP) to Sentinel-2’s
+(BS2) using the SRF. For each Sentinel-2 band b, a weight
+vector wb was computed based on the SRF values overlapping
+the wavelength range of each EnMAP band i. The
+weights were normalized to ensure their sum equaled 1:
+wi,b =
+X
+λ∈[λmin
+i ,λmax
+i ]
+SRFb(λ), ˜wb =
+wb
+1⊤wb
+. (1)
+The complete weight matrix W = [˜w1, . . . , ˜wBS2 ] ∈
+RBEnMAP×BS2 was then applied to project the hyperspectral
+data X ∈ RH×W×BEnMAP into the Sentinel-2 spectral space:
+Yh,w,: = Xh,w,: ·W, ∀ h,w. (2)
+Here, Y ∈ RH×W×BS2 represents the resulting Synthetic
+Sentinel-2 dataset, capturing Sentinel-2’s spectral
+characteristics while preserving the spatial and temporal
+properties of EnMAP data.
+3.3. Greenhouse Gas Data
+We assessed the reconstructed hyperspectral data’s utility
+for predicting concentrations of NO2, CH4, and CO2.
+These GHG products were spatiotemporally mapped to the
+HySpecNet-11k dataset based on the spatial footprint of En-
+MAP patches under application-specific time windows:
+• Sentinel-5P [11]:
+– NO2 retrievals (molm−2) were matched within ±1
+day, reflecting its shorter atmospheric lifetime [17].
+This yielded data for about 88% of the EnMAP
+patches.
+– CH4 measurements (ppb) were matched within ±7
+days, consistent with methane’s longer lifetime [23].
+Approximately 52% of EnMAP patches were matched
+with valid CH4 values.
+• OCO-3 [26] (CO2): Measurements (ppm) were sourced
+from OCO-3, an instrument aboard the International
+Space Station (ISS), using a ±16 day window to account
+for CO2’s extended atmospheric residence time [4]. Only
+5.5% of EnMAP patches had suitable OCO-3 coverage,
+owing to the spatially limited extent of OCO-3 soundings
+and the resulting sparse spatiotemporal overlap with En-
+MAP footprints.
+4. Methods
+4.1. Spectral Transformer Masked Autoencoder
+We introduce a spectral transformer model designed to reconstruct
+hyperspectral data from limited spectral inputs using
+a self-supervised masked autoencoder framework, as
+depicted in Figure 3. Our model leverages a spectral selfattention
+mechanism to capture inter-band dependencies at
+each spatial location. Specifically, for each spatial position,
+tokens corresponding to different spectral bands attend to
+one another. In the encoder, spectral attention is applied
+solely to the visible (unmasked) tokens, allowing the network
+to extract robust latent representations of the available
+spectral information. In the decoder, however, attention is
+computed over both visible and masked tokens, enabling
+the reconstruction of missing spectral bands. Finally, a linear
+layer projects the decoder outputs back into pixel space,
+and the patch-level reconstructions are rearranged to form a
+complete hyperspectral data cube that preserves both spectral
+fidelity and spatial coherence. Finally, the reconstructed
+hyperspectral data cube is compared to the original full hyperspectral
+cube using the Mean Absolute Error (MAE) objective
+function.
+Preprocessing and Patch Embedding We apply bandwise
+normalization using means μb and standard deviations
+σb computed over the training dataset with Welford’s algorithm
+[29]:
+˜xb,:,: =
+xb,:,: − μb
+σb
+, ∀ b ∈ {1, . . . ,B}, (3)
+ensuring each spectral band is on a comparable scale. The
+normalized hyperspectral cube ˜X ∈ RB×H×W (with B
+bands and spatial dimensions H × W) is then divided into
+patches of size b × p × p, where b is a subset of bands and
+p specifies the spatial patch dimensions.
+Let Pi ∈ Rb×p×p be the i-th patch. We flatten Pi into
+Flatten(Pi) ∈ Rb p2 , then map it into a fixed-dimensional
+embedding Ei ∈ Rd via a learnable linear projection:
+Ei = Wembed Flatten(Pi) + bembed, (4)
+Figure 3. High-level overview of the masked autoencoder approach for hyperspectral image reconstruction. The model applies band-wise
+masking to input patches, encodes the latent representations using spectral self-attention, and reconstructs the missing spectral information
+through a decoder.
+where Wembed ∈ Rd×(b p2) and bembed ∈ Rd. This embedding
+preserves both spectral and spatial information,
+preparing the patches for subsequent model processing.
+Spatial-Spectral Positional Encoding We enrich each
+patch embedding with a 2D spatial encoding and a 1D spectral
+encoding based on the patch’s grid coordinates (x, y)
+and its center wavelength λ. For the spatial dimension, we
+use sinusoidal functions. With an embedding dimension d,
+for each index i we define:
+Espatial(x, 2i) = sin
+ x
+10000 2i/d
+
+, (5)
+Espatial(x, 2i + 1) = cos
+ x
+10000 2i/d
+
+, (6)
+and similarly for y.
+For the spectral dimension, we first normalize the center
+wavelength λ into the range [0, 1] and then scale it to align
+with the magnitude of the spatial encoding. This is done as
+follows:
+λscaled =
+λ − λmin
+λmax − λmin
+· Nspatial, (7)
+where λmin = 400nm and λmax = 2500nm are the lower
+and upper bounds of the spectral range, and Nspatial is the
+number of spatial indices (e.g., the grid size of patches in
+one dimension) used for scaling. The scaled wavelength is
+then encoded using sinusoidal functions:
+Espectral(λ, 2i) = sin
+ λscaled
+10000 2i/d
+
+, (8)
+Espectral(λ, 2i + 1) = cos
+ λscaled
+10000 2i/d
+
+. (9)
+The final positional encoding is obtained by summing
+the spatial and spectral encodings element-wise:
+Epos(x, y, λ) = Espatial(x, y) + Espectral(λ). (10)
+This combined encoding is added to the patch embedding
+Ei to yield the initial token:
+Z0
+i = Ei + Epos(xi, yi, λi). (11)
+This process enables the model to incorporate both the spatial
+location and the spectral center of each patch into its
+latent representation.
+Band-wise Masking Strategy To train the model in a
+self-supervised manner, a fraction pmask of the spectral
+indices is randomly selected for masking. Let M ⊂
+{1, . . . ,B} denote the set of masked spectral indices, where
+|M| = pmask×B. For each token Z0
+i corresponding to spectral
+index i, we define the resulting token as:
+˜ Z0
+i =
+(
+Zmask, if i ∈ M,
+Z0
+i , otherwise,
+(12)
+where Zmask is a learnable mask token that signals the absence
+of information, enabling the model to encode missing
+data and reconstruct it from the context provided by unmasked
+tokens.
+4.2. Greenhouse Gas Estimation Model
+To assess the effectiveness of our reconstructed hyperspectral
+data, we evaluate its performance in a downstream
+greenhouse gas estimation task. As shown in Fig. 2, the absorption
+features are more comprehensively captured by the
+dense spectral coverage of EnMAP compared to the sparser
+bands in multispectral imagery. We hypothesize that accurately
+reconstructing these finer details from multispectral
+inputs will yield improved GHG predictions relative to the
+multispectral baseline. It is important to note that our goal
+is not to maximize absolute GHG accuracy, but rather to
+compare the efficacy of different input spectra (original En-
+MAP, reconstructed hyperspectral, and Sentinel-2 data) in
+capturing critical spectral information.
+Input Preparation To obtain a representative spectral
+signature for each image patch, we compute the mean reflectance
+across all spatial pixels. Formally, for each spectral
+band b, the signature is given by
+xb =
+1
+N
+XN
+i=1
+Rb,i, (13)
+where Rb,i denotes the reflectance at pixel i for band b, and
+N is the total number of spatial pixels in the patch. This
+averaging process aligns with the coarser spatial resolution
+of GHG measurements (e.g., Sentinel-5P, OCO-3) and emphasizes
+the spectral characteristics of each patch while removing
+any spatial features.
+Data Normalization For the downstream regression, we
+apply a global normalization:
+˜x =
+x − μ
+σ
+, (14)
+where μ and σ are the mean and standard deviation computed
+across all bands and training samples. This retains
+relative inter-band differences that can be relevant for gas
+detection, in contrast to the band-wise normalization used
+during hyperspectral reconstruction.
+Model Architecture A simple feedforward network
+(multilayer perceptron, MLP) regresses from the spectral
+signature to a single GHG concentration. The input size
+depends on whether the data is (i) Sentinel-2 (12 bands),
+(ii) original EnMAP (202 bands), or (iii) reconstructed
+EnMAP-like spectra. We use mean squared error (MSE)
+loss to penalize large deviations more heavily, thus emphasizing
+the fidelity of reconstructed bands.
+5. Experimental Setup
+We evaluated the spectral transformer model using a threestage
+framework, as illustrated in Fig. 4. In the first stage,
+the model is pre-trained on masked hyperspectral inputs. In
+the second stage, the pre-trained model is fine-tuned using
+multispectral inputs to reconstruct hyperspectral images.
+Finally, the reconstructed hyperspectral data are applied to
+a downstream task for GHG estimation.
+5.1. Dataset Splits
+The HySpecNet-11k dataset provides two predefined splits:
+an easy split, where images are randomly partitioned into
+training, validation, and test sets, and a hard split, where
+it is ensured that images in different sets are sourced from
+distinct EnMAP tiles [12].
+Figure 4. High-level overview of the three-stage experimental
+setup. The model is first pre-trained on masked hyperspectral
+data, then fine-tuned on multispectral inputs to reconstruct
+hyperspectral-like data, and finally evaluated on a downstream
+GHG estimation task.
+Reconstruction Task For the reconstruction task, we
+used the hard split to minimize potential information leakage
+between training, validation, and test sets. This strict
+separation ensures that the model is evaluated on entirely
+unseen EnMAP tiles. Moreover, when pre-training on the
+larger SpectralEarth dataset, any overlapping tiles with the
+HySpecNet-11k test set were excluded from the training set.
+Downstream GHG Task For greenhouse gas estimation,
+we employed the easy split, which randomly partitions the
+images. Since the ground-truth labels (e.g., from Sentinel-
+5P or OCO-3) are unique to each patch, this split maintains
+a diverse geographical distribution while minimizing label
+duplication. All models in this task were trained and evaluated
+under identical conditions for fair comparison.
+5.2. Reconstruction Task
+Pre-Training on Hyperspectral Data The spectral transformer
+autoencoder model was pre-trained on masked hyperspectral
+data from the HySpecNet-11k and SpectralEarth
+datasets using a masking fraction of 80%. This pre-training
+enables the model to learn spectral dependencies across the
+entire wavelength range, establishing a foundation that can
+be fine-tuned on satellite products with sparse spectral coverage
+regardless of the specific wavelengths or number of
+bands available.
+Fine-Tuning on Multispectral Data After pre-training,
+we replaced the masked hyperspectral inputs with multispectral
+data (true Sentinel-2 and synthetic Sentinel-2)
+mapped to the same EnMAP patches. The model was then
+fine-tuned to reconstruct the full hyperspectral range from
+these coarser inputs, with performance evaluated by comparing
+the reconstructed cubes to the original EnMAP data
+on the test set.
+5.3. Downstream GHG Task
+We next assessed whether reconstructed hyperspectral data
+improves GHG estimation. Each EnMAP patch (or its multispectral/
+reconstructed counterpart) was spatially averaged
+to a single spectral signature, then fed into a feedforward
+regressor predicting NO2, CH4, or CO2 concentrations. We
+trained separate models using:
+(i) Original EnMAP (hyperspectral) data – upper baseline;
+(ii) Sentinel-2 (multispectral) data – lower baseline;
+(iii) Reconstructed hyperspectral from Sentinel-2 inputs –
+proposed approach.
+Improvements over the multispectral baseline indicate that
+the reconstruction retains valuable spectral information.
+5.4. Evaluation Metrics
+For hyperspectral reconstruction, we compute the following
+metrics. The Mean Absolute Error (MAE) is defined as
+MAE(X, ˆX ) =
+1
+N
+XN
+i=1
+
+Xi − ˆXi
+
+, (15)
+where X and ˆX denote the ground truth and reconstructed
+data, respectively. The Peak Signal-to-Noise Ratio (PSNR)
+is computed as
+PSNR(X, ˆX ) = 10 log10
+ 
+max(X)2
+MSE(X, ˆX )
+!
+, (16)
+with the Mean Squared Error (MSE) given by
+MSE(X, ˆX ) =
+1
+N
+XN
+i=1
+
+Xi − ˆXi
+2
+. (17)
+The Structural Similarity Index (SSIM) is computed using
+the default values from the torchmetrics library (i.e., C1 =
+0.01 and C2 = 0.03) [27]:
+SSIM(X, ˆX) =
+(2μXμ ˆX + 0.01)(2σX ˆX + 0.03)
+(μ2
+X + μ2
+ˆX
++ 0.01)(σ2X
++ σ2
+ˆX
++ 0.03)
+.
+(18)
+The Spectral Angle Mapper (SAM), which measures the angular
+difference between spectral signatures, is defined as
+SAM(X, ˆX) = arccos
+
+
+PB
+b=1 Xb ˆX q b PB
+b=1 X2
+b
+qPB
+b=1
+ˆX
+2
+b
+
+.
+(19)
+For downstream greenhouse gas prediction, we use the
+same definitions for MAE and MSE (with y and ˆy denoting
+ground-truth and predicted gas concentrations) and additionally
+compute the Root Mean Squared Error (RMSE)
+as
+RMSE(y, ˆy) =
+p
+MSE(y, ˆy), (20)
+and the R2 Score, which quantifies the fraction of variance
+explained by the model, as
+R2 = 1 −
+PN
+i=1(yi − ˆyi)2
+PN
+i=1(yi − ¯y)2
+. (21)
+These metrics together provide a comprehensive assessment
+of both the reconstruction fidelity and the practical utility of
+the reconstructed data for greenhouse gas detection.
+6. Experimental Results
+6.1. Reconstruction Results
+We first evaluated the model’s ability to reconstruct hyperspectral
+imagery from two input types: (i) masked En-
+MAP data (self-supervised pre-training) and (ii) multispectral
+Sentinel-2 data (fine-tuning). Our goal is to assess how
+effectively the model reconstructs the complete hyperspectral
+data cube when substantial portions of the spectral range
+are missing or when only multispectral data is provided.
+Pre-training on Masked EnMAP Data Pre-training the
+spectral transformer autoencoder on masked EnMAP data
+using the HySpecNet-11k and the larger SpectralEarth
+dataset yielded reconstruction results with lower MAE,
+higher PSNR and SSIM, and reduced SAM compared to
+simpler approaches such as Gaussian Sampling and Linear
+Interpolation, as summarized in Table 1.
+Table 1. Quantitative reconstruction results from masked EnMAP
+data.
+Model MAE↓ PSNR↑ SSIM↑ SAM↓
+Gaussian Sampling 848.83 24.65 0.532 39.44
+Linear Interpolation 139.98 36.40 0.971 12.13
+Masked Autoenc. (HS) 41.39 41.82 0.971 3.68
+Masked Autoenc. (SE) 31.82 42.26 0.973 6.46
+HS: HySpecNet-11k; SE: SpectralEarth.
+In our Gaussian Sampling method, values were generated
+from a Gaussian distribution defined by the band-wise
+mean and standard deviation, while Linear Interpolation
+reconstructs masked bands by linearly interpolating from
+neighboring unmasked bands. These results suggest that the
+masked autoencoder captures spectral dependencies more
+effectively than these basic methods. Figure 6 provides
+qualitative examples for selected EnMAP images, where all
+three RGB bands were fully masked, demonstrating that the
+reconstructed RGB bands and spectral signatures closely resemble
+the ground truth.
+Figure 5. Original and reconstructed RGB bands (left and middle
+columns) for selected EnMAP images. The right column displays
+band-wise normalized reflectance at the location of the red dot in
+each RGB image, with ground-truth signatures in blue and reconstructed
+signatures in orange. Masked bands are highlighted in
+gray.
+Fine-tuning on Multispectral Data Table 2 shows that,
+before fine-tuning, reconstruction performance on multispectral
+inputs is substantially degraded for both real
+Sentinel-2 (S2) and synthetic Sentinel-2 (SS2) data.
+Table 2. Reconstruction performance comparison for real (S2) and
+synthetic (SS2) Sentinel-2 data.
+Input Finetuned MAE↓ PSNR↑ SSIM↑ SAM↓
+S2 × 654.20 21.15 0.582 22.29
+S2 ✓ 294.14 27.00 0.767 10.28
+SS2 × 86.38 36.24 0.943 8.11
+SS2 ✓ 50.69 41.36 0.974 3.99
+Fine-tuning markedly improves all metrics for both input
+types. However, even after fine-tuning, the reconstruction
+accuracy on synthetic Sentinel-2 data does not fully match
+that achieved during pre-training on masked hyperspectral
+data. This is likely because, during pre-training, band-wise
+masking is applied randomly, allowing adjacent bands to
+provide context for reconstruction, whereas with synthetic
+Sentinel-2 data only the spectral ranges corresponding to
+Sentinel-2 bands are preserved, creating larger continuous
+spectral gaps to be reconstructed. Furthermore, the comparatively
+poorer metrics for real Sentinel-2 data suggest additional
+confounding factors such as cloud occlusion differences,
+data processing variations, and sensor discrepancies
+that may complicate the reconstruction from this modality.
+Data Efficiency We evaluated the impact of training
+dataset size on reconstruction performance by fine-tuning
+our model on varying fractions (0.1%, 1%, 10%, and 100%)
+of real Sentinel-2 data. Figure 6 plots the mean absolute
+error (MAE) versus the dataset fraction for two scenarios:
+one with randomly initialized weights and one using pretrained
+weights. Results were averaged over multiple runs
+using different random seeds, with the shaded areas representing
+the standard deviation. Across all dataset fractions,
+models initialized with pre-trained weights consistently
+achieved lower MAE than those trained from scratch,
+indicating that pre-training effectively captures transferable
+spectral dependencies and reduces the need for extensive
+labeled data.
+Figure 6. Impact of dataset fraction on reconstruction performance.
+The plot shows MAE as a function of dataset fraction for
+models fine-tuned from scratch (random initialization) and with
+pre-trained weights, with shaded areas indicating standard deviations
+over multiple runs.
+6.2. Greenhouse Gas Detection Results
+Table 3 presents the performance metrics for greenhouse
+gas detection using different input types. Across all three
+gases, models trained on the full original hyperspectral En-
+MAP data consistently achieve lower errors (MAE, MSE,
+RMSE) and higher R2 scores compared to those trained
+on multispectral inputs (both real Sentinel-2 and synthetic
+Sentinel-2). These findings demonstrate that the increased
+spectral coverage and granularity provided by hyperspectral
+data capture critical absorption features that are valuable
+for detecting greenhouse gases, affirming the importance
+of spectral detail in atmospheric monitoring. Furthermore,
+they establish clear upper and lower baselines for our downstream
+task. In subsequent evaluations, any improvement
+over the multispectral baseline when using reconstructed
+hyperspectral data would indicate that our reconstruction
+method successfully recovers additional spectral detail beneficial
+for greenhouse gas detection.
+Table 3. Performance metrics for CH4, NO2, and CO2 detection across different inputs.
+Gas Input Reconstructed MAE↓ MSE↓ RMSE↓ R2 Score ↑
+CH4
+Sentinel-2 × 7.48±0.10 176.24±6.57 13.27±0.25 0.895±0.004
+✓ 7.86±0.07 170.25±8.58 13.05±0.33 0.899±0.005
+Synthetic Sentinel-2 × 7.88±0.10 192.08±7.80 13.86±0.28 0.886±0.005
+✓ 7.58±0.17 178.43±11.96 13.35±0.44 0.894±0.007
+EnMAP × 7.25±0.11 139.27±11.05 11.80±0.46 0.917±0.007
+NO2
+Sentinel-2 × 10.0±0.0×10−6 5.4±0.1×10−10 23.3±0.3×10−6 0.858±0.003
+✓ 10.6±0.1×10−6 6.1±0.6×10−10 24.7±1.2×10−6 0.841±0.016
+Synthetic Sentinel-2 × 9.6±0.5×10−6 4.8±1.5×10−10 21.7±3.3×10−6 0.875±0.039
+✓ 9.4±0.2×10−6 4.3±0.3×10−10 20.8±0.7×10−6 0.887±0.007
+EnMAP × 9.0±0.1×10−6 4.1±0.5×10−10 20.2±1.3×10−6 0.893±0.013
+CO2
+Sentinel-2 × 1.22±0.08 3.46±0.49 1.86±0.13 0.370±0.089
+✓ 1.03±0.03 2.09±0.02 1.45±0.01 0.620±0.004
+Synthetic Sentinel-2 × 1.26±0.01 3.61±0.06 1.90±0.02 0.343±0.011
+✓ 1.17±0.01 3.20±0.07 1.79±0.02 0.419±0.012
+EnMAP × 1.20±0.03 3.38±0.06 1.84±0.02 0.385±0.011
+Methane For methane, the reconstructed hyperspectral
+data improves detection performance across nearly all metrics
+compared to multispectral inputs. This improvement
+is observed for both real Sentinel-2 data and synthetic
+Sentinel-2 data, indicating that the reconstruction method
+successfully recovers additional spectral detail that enhances
+methane detection.
+Nitrogen Dioxide For NO2, reconstruction on synthetic
+Sentinel-2 data moves performance closer to the upper baseline
+provided by full hyperspectral (EnMAP) data, with improvements
+seen across all metrics. However, when applied
+to real Sentinel-2 data, performance degrades in all metrics.
+A likely explanation is that real Sentinel-2 images may
+be up to three days offset from the EnMAP capture, while
+ground-truth NO2 data is aligned within a one-day window.
+Given the short atmospheric lifetime of NO2, this temporal
+mismatch may significantly impact the results, suggesting
+that synthetic Sentinel-2 data, with its identical timestamp
+to the EnMAP data, is more appropriate for NO2 evaluation.
+Carbon Dioxide For CO2, the reconstructed hyperspectral
+data shows improvements over multispectral inputs
+across all metrics. However, these improvements even exceed
+the performance of the original hyperspectral data, rendering
+the results inconclusive. A potential explanation is
+the limited size of the CO2 dataset, which may make the
+outcomes more susceptible to random variations.
+7. Conclusion
+This work presents a framework that bridges the gap between
+hyperspectral and multispectral remote sensing, aiming
+to combine the broad coverage and high revisit frequency
+of multispectral platforms with the rich spectral detail
+of hyperspectral data. Our spectral transformer-masked
+autoencoder effectively reconstructs synthetic hyperspectral
+images that preserve valuable spectral information, which
+can benefit downstream tasks such as greenhouse gas detection,
+as well as other applications that rely on high spectral
+detail but are limited by the spatiotemporal constraints of
+true hyperspectral data.
+However, several limitations warrant further investigation.
+First, the CO2 dataset used in this study is relatively
+small, and future work should explore larger, more diverse
+datasets to better assess the model’s performance for CO2
+detection. Second, the advantage of hyperspectral data over
+multispectral data in the downstream task appears less pronounced
+for greenhouse gas detection; other downstream
+tasks—such as mineral identification or vegetation analysis—
+where spectral detail plays a more critical role may
+reveal stronger performance gains when using synthetic hyperspectral
+data. Additionally, the use of Level-2A (surface
+reflectance) data, dictated by the availability of the EnMAP
+datasets, may not be ideal for atmospheric applications. Future
+studies might consider using Top-of-Atmosphere data
+or focusing on surface-level tasks that are inherently dependent
+on high spectral resolution.
+Despite these challenges, our framework demonstrates
+promising potential for enhancing the utility of multispectral
+imagery by recovering hyperspectral-level information.
+Continued refinement of the reconstruction model and expansion
+to other datasets and applications will further unlock
+the benefits of this approach in remote sensing.
+References
+[1] Abhinav, Adlin Jebakumari S, and Shweta Singh. Spectral
+signature analysis of land sat tm images for improved hyper
+spectral image analysis. In 2024 International Conference on
+Optimization Computing and Wireless Communication (ICOCWC),
+pages 1–6, 2024. 2
+[2] Shefali Aggarwal. Principles of remote sensing. Satellite
+remote sensing and GIS applications in agricultural meteorology,
+23(2):23–28, 2004. 1
+[3] Naif Alsalem, Christopher H. Betters, Yiwei Mao, Iver H.
+Cairns, and Sergio G. Leon-Saval. RedEye-1: a compact
+SWIR hyperspectral imager for observation of atmospheric
+methane and carbon dioxide. Optics Continuum, 2(11):2333,
+2023. 2
+[4] David Archer, Michael Eby, Victor Brovkin, Andy Ridgwell,
+Long Cao, Uwe Mikolajewicz, Ken Caldeira, Katsumi
+Matsumoto, Guy Munhoven, Alvaro Montenegro, and Kathy
+Tokos. Atmospheric lifetime of fossil fuel carbon dioxide.
+Annual Review of Earth and Planetary Sciences, 37(1):117–
+134, 2009. 3
+[5] F. Bertini, O. Brand, S. Carlier, Umberto Del Bello, Matthias
+Drusch, R. Duca, V. Fernandez, C. Ferrario, Marc´ılio Honnayb
+Ferreira, C. Isola, V. Kirschner, P. Laberinti, M. Lambert,
+G. Mandorlo, P. Marcos, Philippe Martimort, S. Moon,
+P. Oldeman, M. Palomba, and J. Pineiro. Sentinel-2 esa’s optical
+high-resolution mission for gmes operational services.
+ESA bulletin. Bulletin ASE. European Space Agency, SP-
+1322, 2012. 1, 2
+[6] Nassim Ait Ali Braham, Conrad M Albrecht, Julien Mairal,
+Jocelyn Chanussot, Yi Wang, and Xiao Xiang Zhu. Spectralearth:
+Training hyperspectral foundation models at scale,
+2024. 2
+[7] Brian David Bue, Erzs´ebet Merenyi, and Be´ata Csatho. Automated
+labeling of materials in hyperspectral imagery. IEEE
+Transactions on Geoscience and Remote Sensing, 2010. 1
+[8] Sabine Chabrillat, Luis Guanter, Karl Segl, Saskia Foerster,
+Sebastian Fischer, Godela Rossner, Anke Schickling, Laura
+LaPorta, Hans-Peter Honold, and Tobias Storch. The enmap
+german spaceborne imaging spectroscopy mission: Update
+and highlights of recent preparatory activities. In IGARSS
+2020 - 2020 IEEE International Geoscience and Remote
+Sensing Symposium, pages 3278–3281, 2020. 1, 2
+[9] Roman Danilov, Oksana Kremneva, and Alexey Pachkin.
+Identification of the spectral patterns of cultivated plants and
+weeds: Hyperspectral vegetation indices. Agronomy, 13(3):
+859, 2023. 2
+[10] European Space Agency (ESA). Sentinel-2 surface reflectance
+harmonized (s2 sr harmonized), 2024. Accessed
+via Google Earth Engine. 2
+[11] European Space Agency (ESA). Sentinel-5p level 2 products,
+2024. Accessed via Google Earth Engine. 2, 3
+[12] Martin Hermann Paul Fuchs and Beg¨um Demir. Hyspecnet-
+11k: A large-scale hyperspectral dataset for benchmarking
+learning-based hyperspectral image compression methods,
+2023. 2, 5
+[13] I.E. Gordon, L.S. Rothman, R.J. Hargreaves, R. Hashemi,
+E.V. Karlovets, F.M. Skinner, E.K. Conway, C. Hill, R.V.
+Kochanov, Y. Tan, P. Wcisło, A.A. Finenko, K. Nelson, P.F.
+Bernath, M. Birk, V. Boudon, A. Campargue, K.V. Chance,
+A. Coustenis, B.J. Drouin, J.–m. Flaud, R.R. Gamache,
+J.T. Hodges, D. Jacquemart, E.J. Mlawer, A.V. Nikitin, V.I.
+Perevalov, M. Rotger, J. Tennyson, G.C. Toon, H. Tran,
+V.G. Tyuterev, E.M. Adkins, A. Baker, A. Barbe, E. Can`e,
+A.G. Cs´asz´ar, A. Dudaryonok, O. Egorov, A.J. Fleisher,
+H. Fleurbaey, A. Foltynowicz, T. Furtenbacher, J.J. Harrison,
+J.–m. Hartmann, V.–m. Horneman, X. Huang, T.
+Karman, J. Karns, S. Kassi, I. Kleiner, V. Kofman, F.
+Kwabia–Tchana, N.N. Lavrentieva, T.J. Lee, D.A. Long,
+A.A. Lukashevskaya, O.M. Lyulin, V.Yu. Makhnev,W. Matt,
+S.T. Massie, M. Melosso, S.N. Mikhailenko, D. Mondelain,
+H.S.P. M¨uller, O.V. Naumenko, A. Perrin, O.L. Polyansky,
+E. Raddaoui, P.L. Raston, Z.D. Reed, M. Rey, C. Richard, R.
+T´obi´as, I. Sadiek, D.W. Schwenke, E. Starikova, K. Sung, F.
+Tamassia, S.A. Tashkun, J. Vander Auwera, I.A. Vasilenko,
+A.A. Vigasin, G.L. Villanueva, B. Vispoel, G. Wagner, A.
+Yachmenev, and S.N. Yurchenko. The HITRAN2020 molecular
+spectroscopic database. Journal of Quantitative Spectroscopy
+and Radiative Transfer, 277:107949, 2021. 2
+[14] Christine Groh and Hendrik Rothe. Remote online processing
+of multispectral image data. Proceedings of SPIE, the International
+Society for Optical Engineering/Proceedings of
+SPIE, 2005. 1
+[15] Jianxin Jia, Jinsong Chen, Xiaorou Zheng, Yueming Wang,
+Shanxin Guo, Haibin Sun, Changhui Jiang, Mika Karjalainen,
+Kirsi Karila, Zhiyong Duan, Tinghuai Wang,
+Chong Xu, Juha Hyyppa, and Yuwei Chen. Tradeoffs in
+the spatial and spectral resolution of airborne hyperspectral
+Imaging Systems: A crop identification case study. IEEE
+Transactions on Geoscience and Remote Sensing, 60:1–18,
+2021. 2
+[16] Felix Kogan. Vegetation Health Method, pages 51–73.
+Springer International Publishing, Cham, 2019. 1
+[17] Kezia Lange, Andreas Richter, and John P. Burrows. Variability
+of nitrogen oxide emission fluxes and lifetimes estimated
+from Sentinel-5P TROPOMI observations. Atmospheric
+chemistry and physics, 22(4):2745–2767, 2022. 3
+[18] David J Lary, Amir H Alavi, Amir H Gandomi, and Annette
+L Walker. Machine Learning in Geosciences and Remote
+Sensing. Geoscience Frontiers, 7(1):3–10, 2016. 1
+[19] Zengyi Li, Ligang Li, Bo Liu, Yuan Cao, Wenbo Zhou, Wei
+Ni, and Zhen Yang. Spectral-Learning-Based transformer
+network for the Spectral Super-Resolution of Remote-
+Sensing degraded images. IEEE Geoscience and Remote
+Sensing Letters, 20:1–5, 2023. 3
+[20] Fabrizio Masin, Tiziano Maestri, and Michele Martinazzo.
+About the use of Satellite Hyperspectral Images for Methane
+Detection. EGU General Assembly 2023, 2023. 2
+[21] Lynn Miller, Charlotte Pelletier, and Geoffrey I.Webb. Deep
+Learning for Satellite Image Time-Series Analysis: A review,
+2024. 1
+[22] NASA. Landsat Missions. https://landsat.gsfc.
+nasa.gov/. Accessed: January 2025. 1
+[23] Marielle Saunois, Philippe Bousquet, Ben Poulter, Anna
+Peregon, Philippe Ciais, Josep G. Canadell, Edward J.
+Dlugokencky, Giuseppe Etiope, David Bastviken, Sander
+Houweling, Greet Janssens-Maenhout, Francesco N.
+Tubiello, Simona Castaldi, Robert B. Jackson, Mihai Alexe,
+Vivek K. Arora, David J. Beerling, Peter Bergamaschi,
+Donald R. Blake, Gordon Brailsford, Victor Brovkin, Lori
+Bruhwiler, Cyril Crevoisier, Patrick Crill, Kristofer Covey,
+Charles Curry, Christian Frankenberg, Nicola Gedney, Lena
+H¨oglund-Isaksson, Misa Ishizawa, Akihiko Ito, Fortunat
+Joos, Heon-Sook Kim, Thomas Kleinen, Paul Krummel,
+Jean-Franc¸ois Lamarque, Ray Langenfelds, Robin Locatelli,
+Toshinobu Machida, Shamil Maksyutov, Kyle C. McDonald,
+Julia Marshall, Joe R. Melton, Isamu Morino, Vaishali
+Naik, Simon O’Doherty, Frans-Jan W. Parmentier, Prabir
+K. Patra, Changhui Peng, Shushi Peng, Glen P. Peters,
+Isabelle Pison, Catherine Prigent, Ronald Prinn, Michel
+Ramonet, William J. Riley, Makoto Saito, Monia Santini,
+Ronny Schroeder, Isobel J. Simpson, Renato Spahni, Paul
+Steele, Atsushi Takizawa, Brett F. Thornton, Hanqin Tian,
+Yasunori Tohjima, Nicolas Viovy, Apostolos Voulgarakis,
+Michiel Van Weele, Guido R. Van Der Werf, Ray Weiss,
+Christine Wiedinmyer, David J. Wilton, Andy Wiltshire,
+Doug Worthy, Debra Wunch, Xiyan Xu, Yukio Yoshida,
+Bowen Zhang, Zhen Zhang, and Qiuan Zhu. The global
+methane budget 2000–2012. Earth system science data, 8
+(2):697–751, 2016. 3
+[24] Martin C. Schodlok, Michaela Frei, and Karl Segl. Implications
+of new hyperspectral satellites for raw materials exploration.
+Mineral Economics, 35(3-4):495–502, 2022. 2
+[25] Hadi Shokati, Mahmoud Mashal, Aliakbar Noroozi, Ali Akbar
+Abkar, Saham Mirzaei, Zahra Mohammadi-Doqozloo,
+Ruhollah Taghizadeh-Mehrjardi, Pegah Khosravani, Kamal
+Nabiollahi, and Thomas Scholten. Random Forest-Based
+soil moisture estimation using Sentinel-2, LaNdsAT-8/9, and
+UAV-Based hyperspectral data. Remote Sensing, 16(11):
+1962, 2024. 2
+[26] T. E. Taylor, C. W. O’Dell, D. Baker, C. Bruegge, A. Chang,
+L. Chapsky, A. Chatterjee, C. Cheng, F. Chevallier, D. Crisp,
+L. Dang, B. Drouin, A. Eldering, L. Feng, B. Fisher, D. Fu,
+M. Gunson, V. Haemmerle, G. R. Keller, M. Kiel, L. Kuai,
+T. Kurosu, A. Lambert, J. Laughner, R. Lee, J. Liu, L. Mandrake,
+Y. Marchetti, G. McGarragh, A. Merrelli, R. R. Nelson,
+G. Osterman, F. Oyafuso, P. I. Palmer, V. H. Payne,
+R. Rosenberg, P. Somkuti, G. Spiers, C. To, B. Weir, P. O.
+Wennberg, S. Yu, and J. Zong. Evaluating the consistency
+between oco-2 and oco-3 xco2 estimates derived from the
+nasa acos version 10 retrieval algorithm. Atmospheric Measurement
+Techniques, 16(12):3173–3209, 2023. 2, 3
+[27] PyTorch Lightning Team. Torchmetrics: Structural similarity
+index (ssim), 2024. Accessed: November 23, 2024. 6
+[28] Hasmukh K. Varchand, Mehul R. Pandya, Jalpesh A. Dave,
+Himanshu J. Trivedi, and Vishal N. Pathak. Sensitivity study
+and intercomparison of CO2 absorption bands in SWIR region.
+IGARSS 2022 - 2022 IEEE International Geoscience
+and Remote Sensing Symposium, 17:6610–6613, 2022. 2
+[29] B. P. Welford. Note on a method for calculating corrected
+sums of squares and products. Technometrics, 4(3):419–420,
+1962. 3
+[30] L Zhang, D Fu, X Sun, H Chen, and X She. A spatialtemporal-
+spectral blending model using satellite images.
+IOP Conference Series Earth and Environmental Science,
+34:012042, 2016. 1, 2
+[31] Xiangtao Zheng, Wenjing Chen, and Xiaoqiang Lu. Spectral
+Super-Resolution of multispectral images using Spatial–
+Spectral Residual Attention Network. IEEE Transactions
+on Geoscience and Remote Sensing, 60:1–14, 2021. 3
+[32] Lucy A. Zimmerman and John P. Kerekes. Comparison of
+Methane Detection Using Shortwave and Longwave Infrared
+Hyperspectral Sensors Under Varying Environmental Conditions.
+IEEE Journal of Selected Topics in Applied Earth
+Observations and Remote Sensing, 16:2517–2531, 2023. 2
