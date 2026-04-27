@@ -20,6 +20,7 @@ from einops import rearrange
 # hidden_size = AutoConfig.from_pretrained(qwen_name).text_config.hidden_size
 
 BAND_STATS_PATH = "emit_band_stats.npz" 
+INSTRUMENT_PATH = "instrument.json"
 FILL = -9999.0
 BANDS = 285
 
@@ -676,16 +677,28 @@ def load_band_stats(path):
     band_mean = d["band_mean"].astype(np.float32)
     band_std  = d["band_std"].astype(np.float32)
     band_cnt  = d["band_cnt"].astype(np.int64) if "band_cnt" in d.files else None
-    return band_mean, band_std, band_cnt
+    wavelengths_nm = d["wavelengths_nm"].astype(np.float32) if "wavelengths_nm" in d.files else None
+    return band_mean, band_std, band_cnt, wavelengths_nm
 
-def save_band_stats(path, band_mean, band_std, band_cnt=None, **meta):
+def load_emit_wavelengths_nm(instrument_path=INSTRUMENT_PATH, expected_bands=BANDS):
+    with open(instrument_path, "r", encoding="utf-8") as file_handle:
+        instrument_metadata = json.load(file_handle)
+    wavelengths_nm = np.asarray(instrument_metadata["wavelengths"], dtype=np.float32)
+    if wavelengths_nm.ndim != 1 or wavelengths_nm.shape[0] != expected_bands:
+        raise ValueError(f"Expected {expected_bands} wavelengths, got {wavelengths_nm.shape}")
+    if not np.all(np.isfinite(wavelengths_nm)):
+        raise ValueError("Non-finite wavelength values found in instrument metadata.")
+    return wavelengths_nm
+
+def save_band_stats(path, band_mean, band_std, band_cnt=None, wavelengths_nm=None, **meta):
     payload = {
         "band_mean": band_mean.astype(np.float32),
         "band_std":  band_std.astype(np.float32),
     }
     if band_cnt is not None:
         payload["band_cnt"] = band_cnt.astype(np.int64)
-    # optional metadata for sanity/debugging
+    if wavelengths_nm is not None:
+        payload["wavelengths_nm"] = np.asarray(wavelengths_nm, dtype=np.float32)
     for k, v in meta.items():
         payload[k] = np.array(v)
     np.savez(path, **payload)
