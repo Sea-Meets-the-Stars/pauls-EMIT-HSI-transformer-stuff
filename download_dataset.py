@@ -35,6 +35,8 @@ those functions and exposes a clean CLI / importable API.
 
 import argparse
 import sys
+import os
+import shutil
 
 import emit_utils
 
@@ -68,6 +70,28 @@ def search_granule_ids_for_gas_type(
     )
     return granule_ids
 
+
+def _granule_output_dir_candidates(dataset_dir: str, granule_id: str, gas_type: str) -> tuple[str, str]:
+    """Same naming as emit_utils.save_one_granule_to_dataset (single- vs multi-plume)."""
+    single = os.path.join(dataset_dir, f"{granule_id}_{gas_type}")
+    multi = os.path.join(dataset_dir, f"{granule_id}_{gas_type}_multiple_plumes")
+    return single, multi
+
+
+def remove_incomplete_granule_dirs(dataset_dir: str, granule_ids: list[str], gas_type: str) -> None:
+    """
+    Delete granule output folders that exist but lack granule_metadata.json.
+    The pipeline writes that file only after a full successful run; without it,
+    save_one_granule_to_dataset would otherwise skip the granule as "already exists".
+    """
+    marker = "granule_metadata.json"
+    for granule_id in granule_ids:
+        for path in _granule_output_dir_candidates(dataset_dir, granule_id, gas_type):
+            meta_path = os.path.join(path, marker)
+            if os.path.isdir(path) and not os.path.isfile(meta_path):
+                print(f"Removing incomplete granule directory (missing {marker}): {path}")
+                shutil.rmtree(path, ignore_errors=True)
+                
 
 def run_full_dataset_build(
     granule_ids: list[str],
@@ -236,6 +260,15 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="Re-process granules that already exist in output_dir.",
     )
+    parser.add_argument(
+        "--reprocess_incomplete",
+        action="store_true",
+        default=False,
+        help=(
+            "Before building, remove granule folders under output_dir that have no "
+            "granule_metadata.json (partial or interrupted runs) so they are rebuilt."
+        ),
+    )
 
     # --- Execution modes ---
     mode_group = parser.add_mutually_exclusive_group()
@@ -309,6 +342,9 @@ def _run_from_cli(cli_args: argparse.Namespace):
     if not granule_ids:
         print("No granules found matching the search criteria. Exiting.")
         sys.exit(0)
+        
+    if cli_args.reprocess_incomplete:
+        remove_incomplete_granule_dirs(cli_args.output_dir, granule_ids, cli_args.gas_type)
 
     print(f"\nStep 2/2 — Building dataset from {len(granule_ids)} granule(s) into '{cli_args.output_dir}'...")
     dataset_index_df = run_full_dataset_build(
