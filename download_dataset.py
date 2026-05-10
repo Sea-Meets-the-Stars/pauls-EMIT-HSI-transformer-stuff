@@ -23,6 +23,7 @@ Notebook / interactive usage
         run_single_granule_test,
         run_plume_stats_survey,
         run_preview_for_granule,
+        reconstruct_dataset_index_from_disk,
     )
 
     # Test a single function in isolation:
@@ -39,6 +40,10 @@ import os
 import shutil
 
 import emit_utils
+
+def reconstruct_dataset_index_from_disk(dataset_dir: str):
+    """Delegates to :func:`emit_utils.reconstruct_dataset_index_from_disk`."""
+    return emit_utils.reconstruct_dataset_index_from_disk(dataset_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +274,15 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "granule_metadata.json (partial or interrupted runs) so they are rebuilt."
         ),
     )
+    parser.add_argument(
+        "--rebuild_index_only",
+        action="store_true",
+        default=False,
+        help=(
+            "Only scan output_dir and rewrite dataset_index.csv from on-disk metadata "
+            "(no Earthdata search or downloads)."
+        ),
+    )
 
     # --- Execution modes ---
     mode_group = parser.add_mutually_exclusive_group()
@@ -303,6 +317,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 def _run_from_cli(cli_args: argparse.Namespace):
     """Dispatch to the appropriate public function based on parsed CLI arguments."""
 
+    # --- Mode: rebuild index from disk only ---
+    if cli_args.rebuild_index_only:
+        dataset_index_df = reconstruct_dataset_index_from_disk(cli_args.output_dir)
+        print(f"\nDone. Dataset index shape: {dataset_index_df.shape}")
+        return
+
     # --- Mode: single-granule test ---
     if cli_args.test_single_granule:
         single_granule_index_df = run_single_granule_test(
@@ -315,6 +335,7 @@ def _run_from_cli(cli_args: argparse.Namespace):
         if single_granule_index_df is not None:
             print("\nSingle-granule index:")
             print(single_granule_index_df.to_string(index=False))
+        reconstruct_dataset_index_from_disk(cli_args.output_dir)
         return
 
     # --- Mode: survey only (no hypercube download) ---
@@ -347,7 +368,7 @@ def _run_from_cli(cli_args: argparse.Namespace):
         remove_incomplete_granule_dirs(cli_args.output_dir, granule_ids, cli_args.gas_type)
 
     print(f"\nStep 2/2 — Building dataset from {len(granule_ids)} granule(s) into '{cli_args.output_dir}'...")
-    dataset_index_df = run_full_dataset_build(
+    run_full_dataset_build(
         granule_ids=granule_ids,
         output_dir=cli_args.output_dir,
         gas_type=cli_args.gas_type,
@@ -355,6 +376,7 @@ def _run_from_cli(cli_args: argparse.Namespace):
         overwrite=cli_args.overwrite,
         run_mag1c=not cli_args.no_mag1c,
     )
+    dataset_index_df = reconstruct_dataset_index_from_disk(cli_args.output_dir)
 
     print(f"\nDone. Dataset index shape: {dataset_index_df.shape}")
 

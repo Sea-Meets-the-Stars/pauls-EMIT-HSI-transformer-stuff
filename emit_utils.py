@@ -45,6 +45,16 @@ DIFFICULTY_QUARTILES = {
     }
 }
 
+# dataset_index.csv — difficulty columns; keep aligned with save_one_granule_to_dataset &
+# reconstruct_dataset_index_from_disk.
+DATASET_INDEX_DIFFICULTY_KEYS = (
+    "max_signal_to_uncertainty",
+    "mean_plume_sensitivity",
+    "plume_pixel_area",
+    "background_std_dev",
+)
+
+
 def get_plume_granule_ids(gas_type="CH4", date_range=('2022-08-01', '2026-12-31'), max_count=100, cloud_cover_range=(0, 5)):
     """
     Searches NASA Earthdata for EMIT plume complexes and returns a list of unique Granule IDs.
@@ -1204,12 +1214,6 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
         json.dump(granule_metadata, f)
     
     # Build returns:
-    _DIFFICULTY_KEYS = (
-        "max_signal_to_uncertainty",
-        "mean_plume_sensitivity",
-        "plume_pixel_area",
-        "background_std_dev",
-    )
     index_rows = []
     for i, plume_metadata in enumerate(plume_metadata_list):
         plume_difficulty = plume_metadata["training_category"]
@@ -1224,7 +1228,7 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "training_category": plume_difficulty,
             "gas_type": gas_type,
         }
-        for k in _DIFFICULTY_KEYS:
+        for k in DATASET_INDEX_DIFFICULTY_KEYS:
             row[k] = plume_metadata.get(k, np.nan)
         index_rows.append(row)
 
@@ -1240,11 +1244,115 @@ def save_one_granule_to_dataset(granule_id, dataset_dir, return_chips = False, o
             "training_category": None,
             "gas_type": gas_type,
         }
-        for k in _DIFFICULTY_KEYS:
+        for k in DATASET_INDEX_DIFFICULTY_KEYS:
             row[k] = np.nan
         index_rows.append(row)
 
     return pd.DataFrame(index_rows)
+
+
+def reconstruct_dataset_index_from_disk(dataset_dir):
+    """
+    Walk dataset_dir for granule folders containing granule_metadata.json; read each
+    chip's plume_metadata.json or chip_metadata.json; write dataset_index.csv with the
+    same schema as save_one_granule_to_dataset index rows.
+
+    Only completed granules (granule_metadata.json present) are included. Ignores
+    directories starting with '_' (e.g. _temp_download).
+
+    Parameters
+    ----------
+    dataset_dir : str
+        Root dataset directory (same as build_dataset ``dataset_dir``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        The reconstructed index. Empty DataFrame with correct columns if nothing found.
+    """
+    base_cols = [
+        "id",
+        "event_id",
+        "granule_id",
+        "plume_id",
+        "label",
+        "num_plume_pixels",
+        "training_category",
+        "gas_type",
+    ]
+    index_columns = base_cols + list(DATASET_INDEX_DIFFICULTY_KEYS)
+
+    rows = []
+    if not os.path.isdir(dataset_dir):
+        print(f"reconstruct_dataset_index_from_disk: not a directory: {dataset_dir}")
+        return pd.DataFrame(columns=index_columns)
+
+    for name in sorted(os.listdir(dataset_dir)):
+        granule_root = os.path.join(dataset_dir, name)
+        if not os.path.isdir(granule_root) or name.startswith("_"):
+            continue
+        gm_path = os.path.join(granule_root, "granule_metadata.json")
+        if not os.path.isfile(gm_path):
+            continue
+        with open(gm_path, "r", encoding="utf-8") as f:
+            granule_meta = json.load(f)
+        granule_id = granule_meta["granule_id"]
+        gas_type_root = granule_meta.get("gas_type", "ch4")
+        base = os.path.basename(granule_root)
+
+        for entry in sorted(os.listdir(granule_root)):
+            sub = os.path.join(granule_root, entry)
+            if not os.path.isdir(sub) or entry == "nasa_plumes":
+                continue
+            plume_path = os.path.join(sub, "plume_metadata.json")
+            chip_path = os.path.join(sub, "chip_metadata.json")
+            if os.path.isfile(plume_path):
+                with open(plume_path, "r", encoding="utf-8") as f:
+                    pm = json.load(f)
+                plume_id = pm.get("plume_id")
+                row = {
+                    "id": f"{granule_id}_{plume_id}",
+                    "event_id": os.path.join(base, entry),
+                    "granule_id": granule_id,
+                    "plume_id": plume_id,
+                    "label": "positive",
+                    "num_plume_pixels": pm.get("num_plume_pixels"),
+                    "training_category": pm.get("training_category"),
+                    "gas_type": gas_type_root,
+                }
+                for k in DATASET_INDEX_DIFFICULTY_KEYS:
+                    v = pm.get(k)
+                    row[k] = np.nan if v is None else v
+                rows.append(row)
+            elif entry.startswith("negative_chip_") and os.path.isfile(chip_path):
+                with open(chip_path, "r", encoding="utf-8") as f:
+                    cm = json.load(f)
+                idx = entry.replace("negative_chip_", "", 1)
+                chip_id = cm.get("chip_id", f"{granule_id}_neg_{idx}")
+                row = {
+                    "id": chip_id,
+                    "event_id": os.path.join(base, entry),
+                    "granule_id": granule_id,
+                    "plume_id": None,
+                    "label": "negative",
+                    "num_plume_pixels": 0,
+                    "training_category": None,
+                    "gas_type": cm.get("gas_type", gas_type_root),
+                }
+                for k in DATASET_INDEX_DIFFICULTY_KEYS:
+                    row[k] = np.nan
+                rows.append(row)
+
+    if not rows:
+        df = pd.DataFrame(columns=index_columns)
+    else:
+        df = pd.DataFrame(rows)
+        df = df.reindex(columns=index_columns)
+
+    csv_path = os.path.join(dataset_dir, "dataset_index.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"reconstruct_dataset_index_from_disk: wrote {len(df)} rows to {csv_path}")
+    return df
 
 
 def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, gas_type="ch4", run_mag1c=True):
