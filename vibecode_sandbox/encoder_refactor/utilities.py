@@ -146,6 +146,12 @@ def num_bands_from_instrument(dataset_dir: str | Path) -> int:
     return int(meta.get("num_bands", len(meta["wavelengths"])))
 
 
+def load_wavelengths_nm_from_instrument(dataset_dir: str | Path) -> np.ndarray:
+    """Center wavelengths per band from instrument.json (nanometers)."""
+    meta = load_instrument_metadata(dataset_dir)
+    return np.asarray(meta["wavelengths"], dtype=np.float32)
+
+
 # --- I/O ---------------------------------------------------------------------
 
 
@@ -341,6 +347,43 @@ def masked_band_mse(x_hat: torch.Tensor, x: torch.Tensor, valid: torch.Tensor, e
     denom_per_band = valid.sum(dim=(0, 2, 3)).clamp_min(eps)
     mse_per_band = diff2.sum(dim=(0, 2, 3)) / denom_per_band
     return mse_per_band.mean()
+
+
+def masked_l1_full_cube(
+    x_hat: torch.Tensor,
+    x: torch.Tensor,
+    valid: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Mean absolute error averaged over valid pixels (paper Eq. 15 style)."""
+    diff = (x_hat - x).abs() * valid
+    return diff.sum() / valid.sum().clamp_min(eps)
+
+
+def band_masked_l1(
+    x_hat: torch.Tensor,
+    x: torch.Tensor,
+    valid: torch.Tensor,
+    band_mask: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    MAE averaged over valid pixels whose spectral band is selected in ``band_mask``.
+
+    Args:
+        band_mask: (C,) bool; True for bands included in the loss (e.g. MAE-masked bands).
+    """
+    w = band_mask.float().view(1, -1, 1, 1).to(device=x.device, dtype=x.dtype)
+    diff = (x_hat - x).abs() * valid * w
+    denom = (valid * w).sum().clamp_min(eps)
+    return diff.sum() / denom
+
+
+def band_indices_to_mask(num_bands: int, indices: torch.Tensor, *, device: torch.device) -> torch.Tensor:
+    """1D long tensor of band indices -> (C,) bool with True at ``indices``."""
+    m = torch.zeros(num_bands, dtype=torch.bool, device=device)
+    m[indices.long()] = True
+    return m
 
 
 def linear_warmup_cosine_scheduler(
