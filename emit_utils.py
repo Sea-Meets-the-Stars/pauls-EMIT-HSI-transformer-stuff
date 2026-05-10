@@ -20,10 +20,10 @@ from scipy.ndimage import gaussian_filter
 from rasterio.enums import Resampling
 import matplotlib.pyplot as plt
 
-sys.path.append('../STARCOP/starcop')
+sys.path.append('/workspace/STARCOP/starcop')
 from starcop.models import mag1c_emit
 
-sys.path.append("../EMIT-Data-Resources/python/modules")
+sys.path.append("/workspace/EMIT-Data-Resources/python/modules")
 from emit_tools import emit_xarray
 
 
