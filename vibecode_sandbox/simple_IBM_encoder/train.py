@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from pathlib import Path
 
@@ -30,6 +31,8 @@ DROPOUT = 0.0
 LAMBDA_MIN_NM = 400.0
 LAMBDA_MAX_NM = 2500.0
 LOG_EVERY = 10
+# Joint objective: masked MAE + weight on full-cube MAE (visible bands otherwise get no gradient).
+LOSS_ALPHA_FULL = 1.0
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -249,6 +252,7 @@ class SpectralMAE(nn.Module):
 
 
 def main():
+    epochs = int(os.environ["MAE_EPOCHS"]) if "MAE_EPOCHS" in os.environ else EPOCHS
     paths = list_hypercube_paths(DATA_ROOT)
     wl_np, num_bands = load_instrument(DATA_ROOT)
     mean, std = compute_band_stats(paths, num_bands)
@@ -268,19 +272,25 @@ def main():
     model = SpectralMAE(C, H, W, PATCH_SIZE, EMBED_DIM, ENC_DEPTH, DEC_DEPTH, NUM_HEADS).to(DEVICE)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     step = 0
-    for ep in range(EPOCHS):
+    for ep in range(epochs):
         for batch in loader:
             batch = batch.to(DEVICE)
             pred, midx = model(batch, wl, None)
             m = torch.zeros(C, dtype=torch.bool, device=DEVICE)
             m[midx] = True
-            loss = (pred - batch).abs()[:, m].mean()
+            abs_err = (pred - batch).abs()
+            loss_masked = abs_err[:, m].mean()
+            loss_full = abs_err.mean()
+            loss = loss_masked + LOSS_ALPHA_FULL * loss_full
             opt.zero_grad()
             loss.backward()
             opt.step()
             step += 1
             if step % LOG_EVERY == 0:
-                print(f"epoch {ep+1}/{EPOCHS} step {step} loss {loss.item():.6f}")
+                print(
+                    f"epoch {ep+1}/{epochs} step {step} "
+                    f"loss {loss.item():.6f} mae_masked {loss_masked.item():.6f} mae_full {loss_full.item():.6f}"
+                )
 
     ckpt_path = Path(__file__).resolve().parent / "checkpoint.pt"
     torch.save(
@@ -289,7 +299,14 @@ def main():
             "band_mean": torch.from_numpy(mean),
             "band_std": torch.from_numpy(std),
             "wavelengths": wl.cpu(),
-            "meta": {"PATCH_SIZE": PATCH_SIZE, "H": H, "W": W, "C": C},
+            "meta": {
+                "PATCH_SIZE": PATCH_SIZE,
+                "H": H,
+                "W": W,
+                "C": C,
+                "LOSS_ALPHA_FULL": LOSS_ALPHA_FULL,
+                "epochs_ran": epochs,
+            },
         },
         ckpt_path,
     )
