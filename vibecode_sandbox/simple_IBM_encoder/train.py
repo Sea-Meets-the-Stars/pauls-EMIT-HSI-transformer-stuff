@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
@@ -15,14 +16,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.amp import GradScaler, autocast
 
 import utils
 
 # --- knobs ---
 DATA_ROOT = Path.home() / "emit_data"
+# Override data dir for smoke tests: MAE_DATA_ROOT=/path
 PATCH_SIZE = 16
 P_MASK = 0.8
-BATCH = 1  # large H,W + full-spectrum decoder needs small batch on GPU
+BATCH = 8  # Override with MAE_BATCH (try 2–4 on GPU if memory allows).
 EPOCHS = 5
 LR = 1e-4
 AUGMENT = True
@@ -46,6 +49,8 @@ CKPT_PATH = Path("/more_data/vibecode_sandbox/simple_IBM_encoder/checkpoint.pt")
 EVAL_HYPERCUBE_PATH: Path | None = None
 EVAL_FIGURE_EVERY_EPOCHS = 5
 EVAL_MASK_SEED = 0
+# Speed (no architecture change): MAE_NUM_WORKERS (default 4), MAE_AMP=0 to disable, MAE_COMPILE=1 for torch.compile.
+DEFAULT_NUM_WORKERS = 4
 
 
 def _sinu_1d(pos: torch.Tensor, dim: int, max_period: float = 10000.0) -> torch.Tensor:
@@ -157,7 +162,8 @@ class HypercubeDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i: int) -> torch.Tensor:
         arr = np.load(self.paths[i], mmap_mode="r")
-        x = torch.from_numpy(np.array(arr, dtype=np.float32, copy=True)).permute(2, 0, 1)
+        # One host copy from mmap (writable buffer for torch); copy=False stays read-only and warns under workers.
+        x = torch.from_numpy(np.asarray(arr, dtype=np.float32, copy=True)).permute(2, 0, 1).contiguous()
         x = (x - self.band_mean) / self.band_std
         if self.augment:
             if x.shape[1] != self._h or x.shape[2] != self._w:
@@ -350,8 +356,24 @@ def main():
     ckpt_dir = ckpt_path.parent
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = list_hypercube_paths(DATA_ROOT)
-    wl_np, num_bands = load_instrument(DATA_ROOT)
+    data_root = (
+        Path(os.environ["MAE_DATA_ROOT"]).expanduser().resolve() if "MAE_DATA_ROOT" in os.environ else DATA_ROOT
+    )
+    batch_size = int(os.environ["MAE_BATCH"]) if "MAE_BATCH" in os.environ else BATCH
+    if batch_size < 1:
+        raise ValueError("MAE_BATCH / BATCH must be >= 1")
+
+    num_workers = int(os.environ.get("MAE_NUM_WORKERS", str(DEFAULT_NUM_WORKERS)))
+    num_workers = max(0, num_workers)
+    pin_memory = DEVICE.type == "cuda"
+    use_amp = DEVICE.type == "cuda" and os.environ.get("MAE_AMP", "1") != "0"
+
+    if DEVICE.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+
+    paths = list_hypercube_paths(data_root)
+    wl_np, num_bands = load_instrument(data_root)
     mean, std = compute_band_stats(paths, num_bands)
     wl = torch.from_numpy(wl_np).to(DEVICE)
 
@@ -365,29 +387,57 @@ def main():
 
     eval_path = resolve_eval_hypercube_path(paths)
     if EVAL_HYPERCUBE_PATH is None and "MAE_EVAL_HYPERCUBE" not in os.environ:
-        print(f"eval RGB figure: first sorted DATA_ROOT chip (override MAE_EVAL_HYPERCUBE or EVAL_HYPERCUBE_PATH): {eval_path}")
+        print(
+            "eval RGB figure: first sorted data_root chip (override MAE_EVAL_HYPERCUBE or EVAL_HYPERCUBE_PATH): "
+            f"{eval_path}"
+        )
     else:
         print(f"eval RGB figure: {eval_path}")
 
     ds = HypercubeDataset(paths, mean, std, augment=AUGMENT, spatial_size=(H, W))
-    loader = torch.utils.data.DataLoader(ds, batch_size=BATCH, shuffle=True, num_workers=0, drop_last=True)
+    loader = torch.utils.data.DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=True,
+        persistent_workers=num_workers > 0,
+    )
 
     model = SpectralMAE(C, H, W, PATCH_SIZE, EMBED_DIM, ENC_DEPTH, DEC_DEPTH, NUM_HEADS).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=LR)
+    if os.environ.get("MAE_COMPILE", "0") == "1":
+        model = torch.compile(model)
+
+    adam_kw: dict = {}
+    if DEVICE.type == "cuda" and os.environ.get("MAE_FUSED_ADAM", "1") != "0":
+        adam_kw["fused"] = True
+    opt = torch.optim.Adam(model.parameters(), lr=LR, **adam_kw)
+    scaler_device = "cuda" if DEVICE.type == "cuda" else "cpu"
+    scaler = GradScaler(scaler_device, enabled=use_amp)
+    print(
+        f"train speed: batch_size={batch_size} num_workers={num_workers} pin_memory={pin_memory} "
+        f"amp={use_amp} compile={os.environ.get('MAE_COMPILE', '0') == '1'} fused_adam={adam_kw.get('fused', False)}"
+    )
     step = 0
     for ep in range(epochs):
         for batch in loader:
-            batch = batch.to(DEVICE)
-            pred, midx = model(batch, wl, None)
-            m = torch.zeros(C, dtype=torch.bool, device=DEVICE)
-            m[midx] = True
-            abs_err = (pred - batch).abs()
-            loss_masked = abs_err[:, m].mean()
-            loss_full = abs_err.mean()
-            loss = loss_masked + LOSS_ALPHA_FULL * loss_full
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+            batch = batch.to(DEVICE, non_blocking=pin_memory)
+            opt.zero_grad(set_to_none=True)
+            amp_ctx = (
+                autocast(device_type="cuda", dtype=torch.float16) if use_amp else contextlib.nullcontext()
+            )
+            with amp_ctx:
+                pred, midx = model(batch, wl, None)
+                m = torch.zeros(C, dtype=torch.bool, device=DEVICE)
+                m[midx] = True
+                abs_err = (pred - batch).abs()
+                loss_masked = abs_err[:, m].mean()
+                loss_full = abs_err.mean()
+                loss = loss_masked + LOSS_ALPHA_FULL * loss_full
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
             step += 1
             if step % LOG_EVERY == 0:
                 print(
