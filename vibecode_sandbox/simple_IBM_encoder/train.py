@@ -17,7 +17,7 @@ DATA_ROOT = Path.home() / "emit_data"
 PATCH_SIZE = 16
 P_MASK = 0.8
 BATCH = 1  # large H,W + full-spectrum decoder needs small batch on GPU
-EPOCHS = 50
+EPOCHS = 5
 LR = 1e-4
 AUGMENT = True
 AUG_H_FLIP_P = 0.5
@@ -292,7 +292,8 @@ def main():
                     f"loss {loss.item():.6f} mae_masked {loss_masked.item():.6f} mae_full {loss_full.item():.6f}"
                 )
 
-    ckpt_path = Path(__file__).resolve().parent / "checkpoint.pt"
+    #ckpt_path = Path(__file__).resolve().parent / "checkpoint.pt"
+    ckpt_path = Path("/more_data/vibecode_sandbox/simple_IBM_encoder/checkpoint.pt")
     torch.save(
         {
             "model": model.state_dict(),
