@@ -8,9 +8,15 @@ import os
 import random
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+
+import utils
 
 # --- knobs ---
 DATA_ROOT = Path.home() / "emit_data"
@@ -34,6 +40,12 @@ LOG_EVERY = 10
 # Joint objective: masked MAE + weight on full-cube MAE (visible bands otherwise get no gradient).
 LOSS_ALPHA_FULL = 1.0
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Final weights + eval figures (override with MAE_CHECKPOINT).
+CKPT_PATH = Path("/more_data/vibecode_sandbox/simple_IBM_encoder/checkpoint.pt")
+# Dedicated eval chip for saved RGB figures (override with MAE_EVAL_HYPERCUBE). If None, env is used; if both unset, first sorted DATA_ROOT chip.
+EVAL_HYPERCUBE_PATH: Path | None = None
+EVAL_FIGURE_EVERY_EPOCHS = 5
+EVAL_MASK_SEED = 0
 
 
 def _sinu_1d(pos: torch.Tensor, dim: int, max_period: float = 10000.0) -> torch.Tensor:
@@ -155,16 +167,20 @@ class HypercubeDataset(torch.utils.data.Dataset):
 
 
 class SpatialSpectralPE(nn.Module):
+    """
+    Paper-style PE: E_pos(x, y, λ) = E_spatial(x, y) + E_spectral(λ) in R^d (element-wise sum).
+
+    Here E_spatial = PE_sin(x; d) + PE_sin(y; d) with the same full embedding dim d for each.
+    Alternative from the paper text: concatenate PE(x) and PE(y) on disjoint d/2 slices to form
+    E_spatial ∈ R^d, then still add E_spectral(λ) ∈ R^d — requires embed_dim divisible by 4 for two
+    even-length sin blocks.
+    """
+
     def __init__(self, gh: int, gw: int, embed_dim: int):
         super().__init__()
-        third = embed_dim // 3
-        dx = (third // 2) * 2
-        dy = (third // 2) * 2
-        ds = embed_dim - dx - dy
-        if ds <= 0 or ds % 2:
-            raise ValueError("embed_dim cannot be split for PE")
+        if embed_dim % 2:
+            raise ValueError("embed_dim must be even for sinusoidal PE")
         self.gh, self.gw = gh, gw
-        self.dx, self.dy, self.ds = dx, dy, ds
         self.embed_dim = embed_dim
         self.register_buffer("_n_sp", torch.tensor(float(max(gh, gw))))
 
@@ -173,21 +189,17 @@ class SpatialSpectralPE(nn.Module):
         C = wl_nm.shape[0]
         d = self.embed_dim
         device, dtype = wl_nm.device, wl_nm.dtype
-        pe = torch.zeros(1, G, C, d, device=device, dtype=dtype)
         g_idx = torch.arange(G, device=device, dtype=torch.float32)
         xg = (g_idx % float(self.gw)).long()
         yg = (g_idx // float(self.gw)).long()
-        ex = _sinu_1d(xg.float(), self.dx)
-        ey = _sinu_1d(yg.float(), self.dy)
+        pe_xy = _sinu_1d(xg.float(), d) + _sinu_1d(yg.float(), d)
         span = LAMBDA_MAX_NM - LAMBDA_MIN_NM
         if span <= 0:
             raise ValueError("LAMBDA_MAX_NM must exceed LAMBDA_MIN_NM")
         lam = wl_nm.float().clamp(LAMBDA_MIN_NM, LAMBDA_MAX_NM)
         lam_s = (lam - LAMBDA_MIN_NM) / span * self._n_sp.to(device)
-        es = _sinu_1d(lam_s, self.ds)
-        pe[0, :, :, : self.dx] = ex.unsqueeze(1).expand(-1, C, -1)
-        pe[0, :, :, self.dx : self.dx + self.dy] = ey.unsqueeze(1).expand(-1, C, -1)
-        pe[0, :, :, self.dx + self.dy :] = es.unsqueeze(0).expand(G, -1, -1)
+        pe_l = _sinu_1d(lam_s, d)
+        pe = (pe_xy.unsqueeze(1) + pe_l.unsqueeze(0)).unsqueeze(0).to(dtype=dtype)
         return pe
 
 
@@ -251,8 +263,93 @@ class SpectralMAE(nn.Module):
         return self.fold(pf), mask_idx
 
 
+def resolve_eval_hypercube_path(all_paths: list[Path]) -> Path:
+    if "MAE_EVAL_HYPERCUBE" in os.environ:
+        p = Path(os.environ["MAE_EVAL_HYPERCUBE"]).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"MAE_EVAL_HYPERCUBE is not a file: {p}")
+        return p
+    if EVAL_HYPERCUBE_PATH is not None:
+        p = Path(EVAL_HYPERCUBE_PATH).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"EVAL_HYPERCUBE_PATH is not a file: {p}")
+        return p
+    return Path(all_paths[0]).resolve()
+
+
+def save_eval_rgb_triptych(
+    model: SpectralMAE,
+    wl: torch.Tensor,
+    band_mean_np: np.ndarray,
+    band_std_np: np.ndarray,
+    eval_path: Path,
+    h: int,
+    w: int,
+    c: int,
+    out_png: Path,
+    device: torch.device,
+) -> None:
+    """RGB triptych like ``inspect.ipynb`` (input / recon / abs diff), percentile-stretched."""
+    raw = np.load(eval_path, mmap_mode="r")
+    if tuple(raw.shape) != (h, w, c):
+        raise ValueError(f"Eval chip shape {tuple(raw.shape)} != {(h, w, c)} for {eval_path}")
+
+    bm = torch.from_numpy(band_mean_np).float()
+    bs = torch.from_numpy(band_std_np).float()
+    x = utils.tensor_hypercube_to_model_input(
+        np.asarray(raw, dtype=np.float32, copy=True), bm, bs, device
+    )
+    band_mean = bm.to(device).view(c, 1, 1)
+    band_std = bs.to(device).view(c, 1, 1)
+
+    nm = max(1, min(c - 1, int(round(P_MASK * c))))
+    torch.manual_seed(EVAL_MASK_SEED)
+    mask_idx = torch.randperm(c, device=device)[:nm].sort()[0]
+
+    was_training = model.training
+    model.eval()
+    with torch.inference_mode():
+        pred, midx = model(x, wl, mask_idx)
+    if was_training:
+        model.train()
+
+    if not torch.equal(mask_idx, midx):
+        raise RuntimeError("model returned mask_idx inconsistent with input")
+
+    inp_phys = utils.denormalize_nchw(x, band_mean, band_std).squeeze(0)
+    pred_phys = utils.denormalize_nchw(pred, band_mean, band_std).squeeze(0)
+    inp_np = inp_phys.cpu().numpy().transpose(1, 2, 0)
+    pred_np = pred_phys.cpu().numpy().transpose(1, 2, 0)
+    wl_cpu = wl.detach().float().cpu().numpy()
+
+    r_i, g_i, b_i = utils.nearest_band_indices(wl_cpu)
+    rgb_in = inp_np[..., [r_i, g_i, b_i]]
+    rgb_pr = pred_np[..., [r_i, g_i, b_i]]
+    rgb_in_s = utils.rgb_percentile_stretch(rgb_in)
+    rgb_pr_s = utils.rgb_percentile_stretch(rgb_pr)
+    rgb_diff = np.mean(np.abs(rgb_in_s - rgb_pr_s), axis=-1)
+
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    axes[0].imshow(rgb_in_s)
+    axes[0].set_title(f"Input RGB (~{wl_cpu[r_i]:.0f}/{wl_cpu[g_i]:.0f}/{wl_cpu[b_i]:.0f} nm)")
+    axes[1].imshow(rgb_pr_s)
+    axes[1].set_title("Reconstructed RGB")
+    axes[2].imshow(rgb_diff, cmap="magma")
+    axes[2].set_title("Mean abs difference (RGB)")
+    for ax in axes:
+        ax.axis("off")
+    plt.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    plt.close(fig)
+
+
 def main():
     epochs = int(os.environ["MAE_EPOCHS"]) if "MAE_EPOCHS" in os.environ else EPOCHS
+    ckpt_path = Path(os.environ["MAE_CHECKPOINT"]).expanduser().resolve() if "MAE_CHECKPOINT" in os.environ else CKPT_PATH
+    ckpt_dir = ckpt_path.parent
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
     paths = list_hypercube_paths(DATA_ROOT)
     wl_np, num_bands = load_instrument(DATA_ROOT)
     mean, std = compute_band_stats(paths, num_bands)
@@ -265,6 +362,12 @@ def main():
         raise ValueError("chip bands != instrument num_bands")
     if H % PATCH_SIZE or W % PATCH_SIZE:
         raise ValueError("chip H,W must divide PATCH_SIZE")
+
+    eval_path = resolve_eval_hypercube_path(paths)
+    if EVAL_HYPERCUBE_PATH is None and "MAE_EVAL_HYPERCUBE" not in os.environ:
+        print(f"eval RGB figure: first sorted DATA_ROOT chip (override MAE_EVAL_HYPERCUBE or EVAL_HYPERCUBE_PATH): {eval_path}")
+    else:
+        print(f"eval RGB figure: {eval_path}")
 
     ds = HypercubeDataset(paths, mean, std, augment=AUGMENT, spatial_size=(H, W))
     loader = torch.utils.data.DataLoader(ds, batch_size=BATCH, shuffle=True, num_workers=0, drop_last=True)
@@ -292,8 +395,10 @@ def main():
                     f"loss {loss.item():.6f} mae_masked {loss_masked.item():.6f} mae_full {loss_full.item():.6f}"
                 )
 
-    #ckpt_path = Path(__file__).resolve().parent / "checkpoint.pt"
-    ckpt_path = Path("/more_data/vibecode_sandbox/simple_IBM_encoder/checkpoint.pt")
+        if ((ep + 1) % EVAL_FIGURE_EVERY_EPOCHS == 0) or (ep + 1 == epochs):
+            out_png = ckpt_dir / f"eval_epoch_{ep + 1:04d}.png"
+            save_eval_rgb_triptych(model, wl, mean, std, eval_path, H, W, C, out_png, DEVICE)
+            print(f"saved eval figure {out_png}")
     torch.save(
         {
             "model": model.state_dict(),
