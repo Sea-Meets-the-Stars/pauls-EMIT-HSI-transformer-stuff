@@ -227,6 +227,7 @@ def main():
     print(f"Found {len(granule_metas)} granules")
     
     total_chips = 0
+    pre_completed_granules = 0
     granules_completed = 0
     total_granules_expected = len(granule_metas)
     
@@ -244,6 +245,7 @@ def main():
                 shutil.rmtree(granule_output_dir)
             else:
                 print(f"Granule {granule_name} exists and is complete. Skipping")
+                pre_completed_granules += 1
                 continue
 
         print(f"Granule {granule_name} does not exist. Downloading")
@@ -274,8 +276,11 @@ def main():
         
         granules_completed += 1
         elapsed_time = time.time() - start_time
-        estimated_time_remaining = elapsed_time / granules_completed * (total_granules_expected - granules_completed)
-        print(f"Estimated time remaining: {estimated_time_remaining}")
+        eta_seconds = elapsed_time / granules_completed * (total_granules_expected - granules_completed - pre_completed_granules)
+        h = int(eta_seconds // 3600)
+        m = int((eta_seconds % 3600) // 60)
+        s = int(eta_seconds % 60)
+        print(f"Granules Completed: {granules_completed + pre_completed_granules}/{total_granules_expected} | Estimated time remaining: {h}h {m}m {s}s")
                         
     # Report final stats
     print(f"Total granules processed: {len(granule_metas)}")
