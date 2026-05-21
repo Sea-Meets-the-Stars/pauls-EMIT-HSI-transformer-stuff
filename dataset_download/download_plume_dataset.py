@@ -196,7 +196,7 @@ def run_product_inventory_for_granule(granule_id: str) -> dict:
 
 def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="download_dataset.py",
+        prog="download_plume_dataset.py",
         description=(
             "Search NASA Earthdata for EMIT plume granules and build a "
             "labelled hyperspectral dataset on disk."
