@@ -215,12 +215,6 @@ def main():
     # Prep Directories
     output_root_dir = args.output_dir
     os.makedirs(output_root_dir, exist_ok=True)
-    
-    temp_dir = os.path.join(output_root_dir, "temp")
-    # Clear temp directory if it exists:
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
-    os.makedirs(temp_dir, exist_ok=True)
   
     # Search earthdata for granules
     granule_metas, granule_names = search_granule_ids(args.start_date, args.end_date, args.cloud_cover_min, args.cloud_cover_max, args.max_granules)
@@ -254,6 +248,12 @@ def main():
             f.write("In progress")
         
         # Download and orthorectify the granule
+        temp_dir = os.path.join(granule_output_dir, "temp")
+        # Clear temp directory if it exists:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir, exist_ok=True)
+        
         hypercube = download_hypercube(granule_meta, temp_dir)
 
         # Chip the hypercube
