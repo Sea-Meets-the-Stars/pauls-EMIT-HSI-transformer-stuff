@@ -29,7 +29,7 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
     def __init__(self, embed_dim = 512, patch_size_spatial = 16, patch_size_spectral = 15, num_heads = 8, 
                  num_encoder_blocks = 4, num_decoder_blocks = 2, mlp_ratio = 4.0, masking_ratio = 0.75):
         super().__init__()
-        # Note: Assuming Hypercubes are (Batch, Channels, Height, Width)
+        # Input layout: (Batch, Height, Width, Channels)
         
         self.patch_size_spatial = patch_size_spatial
         self.patch_size_spectral = patch_size_spectral
@@ -58,6 +58,11 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         self.num_patches_c = self.num_bands // self.patch_size_spectral  # 19
         self.num_tokens = self.num_patches_c * self.num_patches_h * self.num_patches_w  # 1216
         self.n_spatial = max(self.num_patches_h, self.num_patches_w) # 8
+        self.patch_volume = (
+            self.patch_size_spectral
+            * self.patch_size_spatial
+            * self.patch_size_spatial
+        )  # 15 * 16 * 16 = 3840
         
         ## ======================== ##
         ## Patch Embedding options: ##
@@ -67,8 +72,7 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
                                              kernel_size=(self.patch_size_spectral, self.patch_size_spatial, self.patch_size_spatial), 
                                              stride=(self.patch_size_spectral, self.patch_size_spatial, self.patch_size_spatial))
         
-        self.patch_embed_3d_linear = nn.Linear(self.patch_size_spectral * self.patch_size_spatial * self.patch_size_spatial * self.num_bands, 
-                                               self.encoder_embed_dim)
+        self.patch_embed_3d_linear = nn.Linear(self.patch_volume, self.encoder_embed_dim)
         
         
         ## ============================ ##
@@ -147,10 +151,99 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         nn.init.normal_(self.mask_token, std=0.02)
         
         # Reconstruct voxel values in each (s × p × p) patch
-        self.patch_volume = (
-            self.patch_size_spectral
-            * self.patch_size_spatial
-            * self.patch_size_spatial
-        )  # 15 * 16 * 16 = 3840
-        self.pred_head = nn.Linear(self.encoder_embed_dim, self.patch_volume)
         
+        self.pred_head = nn.Linear(self.encoder_embed_dim, self.patch_volume)
+
+    def patchify(self, x):
+        # (B, H, W, C) -> (B, C, H, W) before reshape so patch boundaries align with memory
+        batch_size = x.shape[0]
+        x = x.permute(0, 3, 1, 2)
+        x = x.reshape(
+            batch_size,
+            self.num_patches_c,
+            self.patch_size_spectral,
+            self.num_patches_h,
+            self.patch_size_spatial,
+            self.num_patches_w,
+            self.patch_size_spatial,
+        )
+        x = x.permute(0, 1, 3, 5, 2, 4, 6)
+        return x.reshape(batch_size, self.num_tokens, self.patch_volume)
+
+    def unpatchify(self, patches):
+        batch_size = patches.shape[0]
+        x = patches.reshape(
+            batch_size,
+            self.num_patches_c,
+            self.num_patches_h,
+            self.num_patches_w,
+            self.patch_size_spectral,
+            self.patch_size_spatial,
+            self.patch_size_spatial,
+        )
+        x = x.permute(0, 1, 4, 2, 5, 3, 6)
+        x = x.reshape(batch_size, self.num_bands, self.chip_size_spatial, self.chip_size_spatial)
+        return x.permute(0, 2, 3, 1)
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+
+        ## ======================== ##
+        ## Patchify + linear embed ##
+        ## ======================== ##
+        patches = self.patchify(x)
+        tokens = self.patch_embed_3d_linear(patches)
+        tokens = tokens + self.pos_embed.unsqueeze(0)
+
+        ## ============================ ##
+        ## Spatial-spectral masking    ##
+        ## ============================ ##
+        shuffle = torch.rand(batch_size, self.num_tokens, device=tokens.device).argsort(dim=1)
+        len_visible = int(self.num_tokens * (1.0 - self.masking_ratio))
+        ids_visible = shuffle[:, :len_visible]
+
+        encoder_in = torch.gather(
+            tokens, 1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim)
+        )
+        encoder_out = self.encoder(encoder_in)
+
+        ## ============================ ##
+        ## Decoder + reconstruction    ##
+        ## ============================ ##
+        decoder_in = self.mask_token.expand(batch_size, self.num_tokens, self.encoder_embed_dim).clone()
+        decoder_in.scatter_(
+            1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim), encoder_out
+        )
+        decoder_in = decoder_in + self.pos_embed.unsqueeze(0)
+        decoder_out = self.decoder(decoder_in)
+        pred_patches = self.pred_head(decoder_out)
+
+        ## ============================ ##
+        ## Holistic loss (all tokens)  ##
+        ## ============================ ##
+        loss = F.mse_loss(pred_patches, patches)
+        return loss
+
+    @torch.no_grad()
+    def reconstruct(self, x):
+        batch_size = x.shape[0]
+        patches = self.patchify(x)
+        tokens = self.patch_embed_3d_linear(patches) + self.pos_embed.unsqueeze(0)
+
+        shuffle = torch.rand(batch_size, self.num_tokens, device=tokens.device).argsort(dim=1)
+        len_visible = int(self.num_tokens * (1.0 - self.masking_ratio))
+        ids_visible = shuffle[:, :len_visible]
+
+        encoder_in = torch.gather(
+            tokens, 1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim)
+        )
+        encoder_out = self.encoder(encoder_in)
+
+        decoder_in = self.mask_token.expand(batch_size, self.num_tokens, self.encoder_embed_dim).clone()
+        decoder_in.scatter_(
+            1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim), encoder_out
+        )
+        decoder_in = decoder_in + self.pos_embed.unsqueeze(0)
+        pred_patches = self.pred_head(self.decoder(decoder_in))
+
+        return self.unpatchify(pred_patches), self.unpatchify(patches)
