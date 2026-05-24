@@ -1,4 +1,5 @@
 ### Purpose: Define a simple ViT encoder for hyperspectral images, pretrained using MAE masking
+# Note:  Dimensions are (B, H, W, C)
 
 import torch
 import torch.nn as nn
@@ -9,21 +10,36 @@ import math
 
 
 def sinusoidal_encoding_1d(positions, dim):
-    # positions: (L,) float — x_g, y_g, or λ_scaled
-    # returns: (L, dim)
-    max_period = 10000.0
     half = dim // 2
-    
-    freq_indices = torch.arange(half, device=positions.device, dtype=torch.float32)
-    div_term = torch.exp(freq_indices * 2.0 * (-math.log(max_period) / dim))
-    
-    angle = positions.float().unsqueeze(1) * div_term.unsqueeze(0)
+    freq = torch.exp(
+        torch.arange(half, device=positions.device, dtype=torch.float32)
+        * (-math.log(10000.0) / dim)
+    )
+    angles = positions.float().unsqueeze(1) * freq.unsqueeze(0)
     pe = torch.zeros(positions.shape[0], dim, device=positions.device)
-    
-    pe[:, 0::2] = torch.sin(angle)
-    pe[:, 1::2] = torch.cos(angle)
-    
+    pe[:, 0::2] = torch.sin(angles)
+    pe[:, 1::2] = torch.cos(angles)
     return pe
+
+def build_3d_pos_embed(num_h, num_w, num_c, dim):
+    """
+    Create 3D positional encoding for input order: Batch, Height, Width, Channels.
+    The returned embeddings are ordered as (h, w, c) to match patchify-flatten order with this layout.
+    """
+    h = torch.arange(num_h, dtype=torch.float32)
+    w = torch.arange(num_w, dtype=torch.float32)
+    c = torch.arange(num_c, dtype=torch.float32)
+    pe_h = sinusoidal_encoding_1d(h, dim)  # (H, D)
+    pe_w = sinusoidal_encoding_1d(w, dim)  # (W, D)
+    pe_c = sinusoidal_encoding_1d(c, dim)  # (C, D)
+    # Token order (h, w, c) matches patchify flatten order for BHWC
+    pos = (
+        pe_h[:, None, None, :]     # (H, 1, 1, D)
+        + pe_w[None, :, None, :]   # (1, W, 1, D)
+        + pe_c[None, None, :, :]   # (1, 1, C, D)
+    )  # (H, W, C, D)
+    return pos.reshape(num_h * num_w * num_c, dim)
+
 
 class SimpleHyperspectralMAEEncoder(nn.Module):
     def __init__(self, embed_dim = 512, patch_size_spatial = 16, patch_size_spectral = 15, num_heads = 8, 
@@ -81,33 +97,10 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         #TODO: Verify if dimensionality works for these:
         # Use sinusoidal positional encoding:
         
-        # Add: factorized tables forward can index or broadcast.
-        # Spatial: patch grid coordinates (not patch_size)
-        x_idx = torch.arange(self.num_patches_w, dtype=torch.float32)   # 0..7
-        y_idx = torch.arange(self.num_patches_h, dtype=torch.float32)   # 0..7
-        
-        # Spectral: index scaling replaces λ (equally spaced → same as normalized c)
-        # Matches Eq. (7) with c/(C'-1) in [0,1] then × N_spatial
-        denom = max(self.num_patches_c - 1, 1)
-        c_scaled = torch.arange(self.num_patches_c, dtype=torch.float32) * (self.n_spatial / denom)
-        
-        self.register_buffer("pe_x", sinusoidal_encoding_1d(x_idx, self.encoder_embed_dim))       # (Wp, D)
-        self.register_buffer("pe_y", sinusoidal_encoding_1d(y_idx, self.encoder_embed_dim))       # (Hp, D)
-        self.register_buffer("pe_spectral", sinusoidal_encoding_1d(c_scaled, self.encoder_embed_dim))  # (Cp, D)
-        
-        
-        #TODO: Audit to make sure this is right.  This is from an LLM raw:
-        g_idx = torch.arange(self.num_patches_h * self.num_patches_w, dtype=torch.float32)
-        x_g = (g_idx % self.num_patches_w).long()
-        y_g = (g_idx // self.num_patches_w).long()
-        e_spatial = sinusoidal_encoding_1d(x_g.float(), self.encoder_embed_dim) + sinusoidal_encoding_1d(
-            y_g.float(), self.encoder_embed_dim
-        )  # (G, D) with G = 64
-        e_pos = self.pe_spectral[:, None, :] + e_spatial[None, :, :]  # (C′, G, D)
-        self.register_buffer(
-            "pos_embed",
-            e_pos.reshape(self.num_tokens, self.encoder_embed_dim),
-        )  # (1216, D)
+        pos_embed = build_3d_pos_embed(
+            self.num_patches_h, self.num_patches_w, self.num_patches_c, self.encoder_embed_dim
+        )
+        self.register_buffer("pos_embed", pos_embed)
         
         
         ## ============================ ##
@@ -155,35 +148,38 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         self.pred_head = nn.Linear(self.encoder_embed_dim, self.patch_volume)
 
     def patchify(self, x):
-        # (B, H, W, C) -> (B, C, H, W) before reshape so patch boundaries align with memory
+        # (B, H, W, C) -> tokens in (h, w, c) order
         batch_size = x.shape[0]
-        x = x.permute(0, 3, 1, 2)
         x = x.reshape(
             batch_size,
-            self.num_patches_c,
-            self.patch_size_spectral,
             self.num_patches_h,
             self.patch_size_spatial,
             self.num_patches_w,
             self.patch_size_spatial,
+            self.num_patches_c,
+            self.patch_size_spectral,
         )
-        x = x.permute(0, 1, 3, 5, 2, 4, 6)
+        x = x.permute(0, 1, 3, 5, 2, 4, 6)  # (B, Hp, Wp, Cp, ps_h, ps_w, ps_c)
         return x.reshape(batch_size, self.num_tokens, self.patch_volume)
 
     def unpatchify(self, patches):
         batch_size = patches.shape[0]
         x = patches.reshape(
             batch_size,
-            self.num_patches_c,
             self.num_patches_h,
             self.num_patches_w,
+            self.num_patches_c,
+            self.patch_size_spatial,
+            self.patch_size_spatial,
             self.patch_size_spectral,
-            self.patch_size_spatial,
-            self.patch_size_spatial,
         )
-        x = x.permute(0, 1, 4, 2, 5, 3, 6)
-        x = x.reshape(batch_size, self.num_bands, self.chip_size_spatial, self.chip_size_spatial)
-        return x.permute(0, 2, 3, 1)
+        x = x.permute(0, 1, 4, 2, 5, 3, 6)  # (B, Hp, ps_h, Wp, ps_w, Cp, ps_c)
+        return x.reshape(
+            batch_size,
+            self.chip_size_spatial,
+            self.chip_size_spatial,
+            self.num_bands,
+        )  # (B, H, W, C)
 
     def forward(self, x):
         batch_size = x.shape[0]

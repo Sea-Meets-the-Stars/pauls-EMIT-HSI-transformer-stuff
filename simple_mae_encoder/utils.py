@@ -14,6 +14,9 @@ def visualize_hypercube(hypercube, bands=[36, 23, 9]):
     #slice hypercube using bands:
     hypercube = hypercube[:, :, bands]
     
+    #normalize hypercube to 0-1
+    hypercube = (hypercube - np.min(hypercube)) / (np.max(hypercube) - np.min(hypercube))
+    
     plt.imshow(hypercube)
     plt.show()
     
@@ -29,6 +32,10 @@ def visualize_reconstruction(reconstruction, original, bands=[36, 23, 9]):
     #slice reconstruction and original using bands:
     reconstruction = reconstruction[:, :, bands]
     original = original[:, :, bands]
+    
+    #normalize reconstruction and original to 0-1
+    reconstruction = (reconstruction - np.min(reconstruction)) / (np.max(reconstruction) - np.min(reconstruction))
+    original = (original - np.min(original)) / (np.max(original) - np.min(original))
     
     #visualize reconstruction and original side by side in one fig:
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
