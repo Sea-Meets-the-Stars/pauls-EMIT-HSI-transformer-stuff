@@ -196,6 +196,10 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         ## ============================ ##
         shuffle = torch.rand(batch_size, self.num_tokens, device=tokens.device).argsort(dim=1)
         ids_visible = shuffle[:, :self.len_visible]
+        
+        # Generate a binary mask (1 = masked, 0 = visible) for the loss function
+        mask = torch.ones(batch_size, self.num_tokens, device=tokens.device)
+        mask.scatter_(1, ids_visible, 0)
 
         encoder_in = torch.gather(
             tokens, 1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim)
@@ -217,35 +221,43 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         ## Holistic loss (all tokens)  ##
         ## ============================ ##
         #loss = F.mse_loss(pred_patches, patches)
-        return pred_patches
+        return pred_patches, mask, patches
 
     @torch.no_grad()
     def reconstruct(self, x):
-        pred = self.forward(x)
+        pred, _, _ = self.forward(x)
         return self.unpatchify(pred)
 
 
+    def masked_loss(self, pred_patches, mask, target_patches):
+        """
+        Calculates the Mean Squared Error (MSE) loss exclusively on the masked patches.
+        
+        Args:
+            pred_patches (torch.Tensor): The reconstructed patches from the model. 
+                                        Shape: (Batch, Num_Tokens, Patch_Volume)
+            target_patches (torch.Tensor): The original, unmodified image patches. 
+                                        Shape: (Batch, Num_Tokens, Patch_Volume)
+            mask (torch.Tensor): Binary mask where 1 = masked token and 0 = visible token.
+                                Shape: (Batch, Num_Tokens)
+                                
+        Returns:
+            torch.Tensor: The scalar loss value computed only over the hidden data.
+        """
+        # Calculate raw MSE across all tokens and all features
+        loss = (pred_patches - target_patches) ** 2
 
-    # @torch.no_grad()
-    # def reconstruct(self, x):
-    #     batch_size = x.shape[0]
-    #     patches = self.patchify(x)
-    #     tokens = self.patch_embed_3d_linear(patches) + self.pos_embed.unsqueeze(0)
+        # Average the feature dimension (patch_volume) to get a per-token loss
+        loss = loss.mean(dim=-1)
 
-    #     shuffle = torch.rand(batch_size, self.num_tokens, device=tokens.device).argsort(dim=1)
-    #     len_visible = int(self.num_tokens * (1.0 - self.masking_ratio))
-    #     ids_visible = shuffle[:, :len_visible]
+        # Apply the mask to zero out visible patches, then average over the masked sum
+        masked_loss = (loss * mask).sum() / mask.sum() 
 
-    #     encoder_in = torch.gather(
-    #         tokens, 1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim)
-    #     )
-    #     encoder_out = self.encoder(encoder_in)
+        return masked_loss
 
-    #     decoder_in = self.mask_token.expand(batch_size, self.num_tokens, self.encoder_embed_dim).clone()
-    #     decoder_in.scatter_(
-    #         1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim), encoder_out
-    #     )
-    #     decoder_in = decoder_in + self.pos_embed.unsqueeze(0)
-    #     pred_patches = self.pred_head(self.decoder(decoder_in))
-
-    #     return self.unpatchify(pred_patches), self.unpatchify(patches)
+    def mse_loss(self, pred_patches, target_patches):
+        """
+        Calculates the Mean Squared Error (MSE) loss across all patches.
+        """
+        loss = (pred_patches - target_patches) ** 2
+        return loss.mean()

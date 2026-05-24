@@ -35,6 +35,7 @@ def visualize_reconstruction(reconstruction, original, bands=[36, 23, 9]):
     
     #normalize reconstruction and original to 0-1
     reconstruction = (reconstruction - np.min(reconstruction)) / (np.max(reconstruction) - np.min(reconstruction))
+    reconstruction_normed_to_original = (reconstruction - np.min(original)) / (np.max(original) - np.min(original))
     original = (original - np.min(original)) / (np.max(original) - np.min(original))
     
     #visualize reconstruction and original side by side in one fig:
