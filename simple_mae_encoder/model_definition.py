@@ -21,10 +21,14 @@ def sinusoidal_encoding_1d(positions, dim):
     pe[:, 1::2] = torch.cos(angles)
     return pe
 
-def build_3d_pos_embed(num_h, num_w, num_c, dim):
+def build_3d_pos_embed_old(num_h, num_w, num_c, dim):
     """
     Create 3D positional encoding for input order: Batch, Height, Width, Channels.
     The returned embeddings are ordered as (h, w, c) to match patchify-flatten order with this layout.
+    
+    Note: This may cause interference patterns between different patches, and could mark certain patches as identical in their reconstruction, 
+          which may be what's causing the ringing effect seen in the reconstruction with circular artifacts centered at 0,0
+    
     """
     h = torch.arange(num_h, dtype=torch.float32)
     w = torch.arange(num_w, dtype=torch.float32)
@@ -38,6 +42,35 @@ def build_3d_pos_embed(num_h, num_w, num_c, dim):
         + pe_w[None, :, None, :]   # (1, W, 1, D)
         + pe_c[None, None, :, :]   # (1, 1, C, D)
     )  # (H, W, C, D)
+    return pos.reshape(num_h * num_w * num_c, dim)
+
+def build_3d_pos_embed(num_h, num_w, num_c, dim):
+    """
+    Creates orthogonal 3D positional encodings by splitting the embedding 
+    dimension and concatenating the spatial/spectral coordinates.
+    """
+    # 1. Split the embedding dimension into three distinct chunks
+    dim_h = dim // 3
+    dim_w = dim // 3
+    dim_c = dim - dim_h - dim_w  # Give the remainder to channels
+    
+    h = torch.arange(num_h, dtype=torch.float32)
+    w = torch.arange(num_w, dtype=torch.float32)
+    c = torch.arange(num_c, dtype=torch.float32)
+    
+    # 2. Generate separate 1D encodings for each chunk
+    pe_h = sinusoidal_encoding_1d(h, dim_h)  # (H, dim_h)
+    pe_w = sinusoidal_encoding_1d(w, dim_w)  # (W, dim_w)
+    pe_c = sinusoidal_encoding_1d(c, dim_c)  # (C, dim_c)
+    
+    # 3. Expand them to full 3D grid shapes before combining
+    pe_h = pe_h[:, None, None, :].expand(-1, num_w, num_c, -1)
+    pe_w = pe_w[None, :, None, :].expand(num_h, -1, num_c, -1)
+    pe_c = pe_c[None, None, :, :].expand(num_h, num_w, -1, -1)
+    
+    # 4. CONCATENATE along the feature dimension instead of adding
+    pos = torch.cat([pe_h, pe_w, pe_c], dim=-1)  # (H, W, C, D)
+    
     return pos.reshape(num_h * num_w * num_c, dim)
 
 
@@ -261,3 +294,15 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         """
         loss = (pred_patches - target_patches) ** 2
         return loss.mean()
+    
+    def weighted_holistic_loss(self, pred_patches, mask, target_patches, alpha=0.05):
+        # 1. Raw MSE across all tokens
+        loss = (pred_patches - target_patches) ** 2
+        loss = loss.mean(dim=-1)
+
+        # 2. Split the loss calculation
+        masked_loss = (loss * mask).sum() / mask.sum()
+        visible_loss = (loss * (1 - mask)).sum() / (1 - mask).sum()
+
+        # 3. Combine with heavy bias toward the masked tokens
+        return masked_loss + (alpha * visible_loss)
