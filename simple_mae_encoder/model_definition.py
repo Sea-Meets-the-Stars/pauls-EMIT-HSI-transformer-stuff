@@ -79,6 +79,7 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
             * self.patch_size_spatial
             * self.patch_size_spatial
         )  # 15 * 16 * 16 = 3840
+        self.len_visible = int(self.num_tokens * (1.0 - self.masking_ratio))
         
         ## ======================== ##
         ## Patch Embedding options: ##
@@ -184,19 +185,17 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
 
-        ## ======================== ##
-        ## Patchify + linear embed ##
-        ## ======================== ##
+        ## ============================================= ##
+        ## Patchify + linear embed + positional encoding ##
+        ## ============================================= ##
         patches = self.patchify(x)
-        tokens = self.patch_embed_3d_linear(patches)
-        tokens = tokens + self.pos_embed.unsqueeze(0)
+        tokens = self.patch_embed_3d_linear(patches) + self.pos_embed
 
         ## ============================ ##
         ## Spatial-spectral masking    ##
         ## ============================ ##
         shuffle = torch.rand(batch_size, self.num_tokens, device=tokens.device).argsort(dim=1)
-        len_visible = int(self.num_tokens * (1.0 - self.masking_ratio))
-        ids_visible = shuffle[:, :len_visible]
+        ids_visible = shuffle[:, :self.len_visible]
 
         encoder_in = torch.gather(
             tokens, 1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim)
@@ -217,29 +216,36 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
         ## ============================ ##
         ## Holistic loss (all tokens)  ##
         ## ============================ ##
-        loss = F.mse_loss(pred_patches, patches)
-        return loss
+        #loss = F.mse_loss(pred_patches, patches)
+        return pred_patches
 
     @torch.no_grad()
     def reconstruct(self, x):
-        batch_size = x.shape[0]
-        patches = self.patchify(x)
-        tokens = self.patch_embed_3d_linear(patches) + self.pos_embed.unsqueeze(0)
+        pred = self.forward(x)
+        return self.unpatchify(pred)
 
-        shuffle = torch.rand(batch_size, self.num_tokens, device=tokens.device).argsort(dim=1)
-        len_visible = int(self.num_tokens * (1.0 - self.masking_ratio))
-        ids_visible = shuffle[:, :len_visible]
 
-        encoder_in = torch.gather(
-            tokens, 1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim)
-        )
-        encoder_out = self.encoder(encoder_in)
 
-        decoder_in = self.mask_token.expand(batch_size, self.num_tokens, self.encoder_embed_dim).clone()
-        decoder_in.scatter_(
-            1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim), encoder_out
-        )
-        decoder_in = decoder_in + self.pos_embed.unsqueeze(0)
-        pred_patches = self.pred_head(self.decoder(decoder_in))
+    # @torch.no_grad()
+    # def reconstruct(self, x):
+    #     batch_size = x.shape[0]
+    #     patches = self.patchify(x)
+    #     tokens = self.patch_embed_3d_linear(patches) + self.pos_embed.unsqueeze(0)
 
-        return self.unpatchify(pred_patches), self.unpatchify(patches)
+    #     shuffle = torch.rand(batch_size, self.num_tokens, device=tokens.device).argsort(dim=1)
+    #     len_visible = int(self.num_tokens * (1.0 - self.masking_ratio))
+    #     ids_visible = shuffle[:, :len_visible]
+
+    #     encoder_in = torch.gather(
+    #         tokens, 1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim)
+    #     )
+    #     encoder_out = self.encoder(encoder_in)
+
+    #     decoder_in = self.mask_token.expand(batch_size, self.num_tokens, self.encoder_embed_dim).clone()
+    #     decoder_in.scatter_(
+    #         1, ids_visible.unsqueeze(-1).expand(-1, -1, self.encoder_embed_dim), encoder_out
+    #     )
+    #     decoder_in = decoder_in + self.pos_embed.unsqueeze(0)
+    #     pred_patches = self.pred_head(self.decoder(decoder_in))
+
+    #     return self.unpatchify(pred_patches), self.unpatchify(patches)
