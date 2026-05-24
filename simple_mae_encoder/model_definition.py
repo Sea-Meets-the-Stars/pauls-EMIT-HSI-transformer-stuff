@@ -113,7 +113,7 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
             dim_feedforward=int(self.encoder_embed_dim * self.mlp_ratio),
             batch_first=True,       # (B, N, D) in forward
             activation="gelu",      # explicit (ViT/MAE default)
-            norm_first=False,       # explicit pre-LN vs post-LN choice
+            norm_first=True,       
         )
         
         self.encoder = nn.TransformerEncoder(
@@ -130,7 +130,7 @@ class SimpleHyperspectralMAEEncoder(nn.Module):
             dim_feedforward=int(self.decoder_embed_dim * self.mlp_ratio),
             batch_first=True,       # (B, N, D) in forward
             activation="gelu",      # explicit (ViT/MAE default)
-            norm_first=False,       # explicit pre-LN vs post-LN choice
+            norm_first=True,       
         )
         
         self.decoder = nn.TransformerEncoder(
