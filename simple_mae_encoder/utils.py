@@ -75,12 +75,15 @@ def unnormalize_chip(chip, chip_mean, chip_std):
     return chip * chip_std + chip_mean
     
 class HyperspectralDataset(Dataset):
-    def __init__(self, data_dir, max_files=None):
+    def __init__(self, data_dir, max_files=None, return_stats=False):
         """
         Args:
             data_dir (str): Path to the directory containing .h5 files.
             max_files (int): Limit the dataset size for overfitting tests.
+            return_stats (bool): Return the mean and standard deviation of the chip.
         """
+        self.return_stats = return_stats
+        
         # Find all .h5 files in the directory
         self.file_paths = glob.glob(os.path.join(data_dir, "*.h5"))
         
@@ -93,7 +96,7 @@ class HyperspectralDataset(Dataset):
     def __len__(self):
         return len(self.file_paths)
 
-    def __getitem__(self, idx, return_stats=False):
+    def __getitem__(self, idx):
         # 1. Load the HDF5 file
         with h5py.File(self.file_paths[idx], 'r') as f:
             array = np.array(f['hypercube'], dtype=np.float32)
@@ -101,8 +104,8 @@ class HyperspectralDataset(Dataset):
         # 2. Normalize the chip
         array, mean, std = normalize_chip(array)
         
-        # 3. Return as PyTorch Tensor
-        if return_stats:
+        # 3. Return as PyTorch Tensor or mean and std
+        if self.return_stats:
             return torch.from_numpy(array), mean, std
         else:
             return torch.from_numpy(array)
