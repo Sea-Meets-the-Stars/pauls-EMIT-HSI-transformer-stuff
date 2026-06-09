@@ -12,7 +12,8 @@ CLI usage
         --start_date     2023-01-01 \\
         --end_date       2025-12-31 \\
         --cloud_cover_max 3 \\
-        --cube_format    npy \\
+        --chip_size       128 \\
+        --cube_format    hdf5 \\
         --overwrite
 
 Notebook / interactive usage
@@ -105,6 +106,7 @@ def run_full_dataset_build(
     cube_format: str = "npy",
     overwrite: bool = False,
     run_mag1c: bool = True,
+    chip_size: int = 128,
 ):
     """
     Download, chip, and save a complete labelled dataset for the supplied
@@ -119,6 +121,7 @@ def run_full_dataset_build(
         overwrite=overwrite,
         gas_type=gas_type,
         run_mag1c=run_mag1c,
+        chip_size=chip_size,
     )
     return dataset_index_df
 
@@ -129,6 +132,7 @@ def run_single_granule_test(
     gas_type: str = "ch4",
     cube_format: str = "npy",
     run_mag1c: bool = True,
+    chip_size: int = 128,
 ):
     """
     Process exactly one granule end-to-end.  Useful for testing the pipeline
@@ -145,6 +149,7 @@ def run_single_granule_test(
         cube_format=cube_format,
         overwrite=True,
         run_mag1c=run_mag1c,
+        chip_size=chip_size,
     )
     return single_granule_index_df
 
@@ -311,6 +316,14 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="Skip MAG1C for CH4 granules (faster; CH4 mag1c.npy chips not written).",
     )
+    
+    # --- Chip size ---
+    parser.add_argument(
+        "--chip_size",
+        type=int,
+        default=128,
+        help="Size of the chips to create.",
+    )
     return parser
 
 
@@ -331,6 +344,7 @@ def _run_from_cli(cli_args: argparse.Namespace):
             gas_type=cli_args.gas_type,
             cube_format=cli_args.cube_format,
             run_mag1c=not cli_args.no_mag1c,
+            chip_size=cli_args.chip_size,
         )
         if single_granule_index_df is not None:
             print("\nSingle-granule index:")
@@ -375,6 +389,7 @@ def _run_from_cli(cli_args: argparse.Namespace):
         cube_format=cli_args.cube_format,
         overwrite=cli_args.overwrite,
         run_mag1c=not cli_args.no_mag1c,
+        chip_size=cli_args.chip_size,
     )
     dataset_index_df = reconstruct_dataset_index_from_disk(cli_args.output_dir)
 

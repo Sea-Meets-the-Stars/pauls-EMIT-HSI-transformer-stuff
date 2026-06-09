@@ -1355,7 +1355,7 @@ def reconstruct_dataset_index_from_disk(dataset_dir):
     return df
 
 
-def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, gas_type="ch4", run_mag1c=True):
+def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, gas_type="ch4", run_mag1c=True, chip_size=128):
     """
     Build a complete dataset from a list of granule IDs.
 
@@ -1369,6 +1369,7 @@ def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, 
         overwrite:                  if False, skip granules whose directories already exist
         gas_type:                   "ch4" or "co2"
         run_mag1c:                  if True, run MAG1C on the L1B hypercube
+        chip_size:                  size of the chips to create
     
     Returns:
         The full dataset index as a pandas DataFrame.
@@ -1380,7 +1381,7 @@ def build_dataset(granule_ids, dataset_dir, cube_format="npy", overwrite=False, 
         print(f"\n[{i+1}/{len(granule_ids)}] Processing {gas_type.upper()} granule {granule_id}...")
         try:
             result = save_one_granule_to_dataset(
-                granule_id, dataset_dir, overwrite=overwrite, cube_format=cube_format, gas_type=gas_type, run_mag1c=run_mag1c
+                granule_id, dataset_dir, overwrite=overwrite, cube_format=cube_format, gas_type=gas_type, run_mag1c=run_mag1c, chip_size=chip_size
             )
             if result is not None and isinstance(result, pd.DataFrame):
                 all_index_dfs.append(result)
